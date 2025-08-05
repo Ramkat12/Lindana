@@ -950,7 +950,7 @@ async def share_location_with_contacts(
         
         # Get the base URL
         ##base_url = os.getenv("API_BASE_URL", "https://2b00-2c0f-fe38-219b-d073-f583-7cfc-f676-cc1.ngrok-free.app")
-        base_url = "https://b0b2bb2b9a75.ngrok-free.app"
+        base_url = "https://f7ad1c0e179a.ngrok-free.app"
         
         # Create URLs
         full_tracking_url = f"{base_url}/gps/track/{current_user['user_id']}?session_token={session_token}"
@@ -1110,7 +1110,7 @@ async def track_user_location(
             </head>
             <body>
                 <div class="error-container">
-                    <h2>🔗 Tracking Session Not Available</h2>
+                    <h2>Tracking Session Not Available</h2>
                     <p>This tracking session has either expired or is invalid.</p>
                     <p>Please request a new tracking link from the person sharing their location.</p>
                 </div>
@@ -1825,7 +1825,7 @@ async def get_shareable_link(
         # Create URLs
         short_token = sharing_session.session_token[:12]
         ##base_url = os.getenv("API_BASE_URL", "https://2b00-2c0f-fe38-219b-d073-f583-7cfc-f676-cc1.ngrok-free.app")  # Replace with your actual domain
-        base_url="https://b0b2bb2b9a75.ngrok-free.app"
+        base_url="https://f7ad1c0e179a.ngrok-free.app"
         short_url = f"{base_url}/track/{short_token}"
         full_url = f"{base_url}/gps/track/{sharing_session.user_id}?session_token={sharing_session.session_token}"
         
