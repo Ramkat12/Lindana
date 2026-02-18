@@ -1,11 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:is_project_1/components/custom_legal_navbar.dart';
 import 'package:is_project_1/pages/legal_aid_pages/legal_aid_clients_page.dart';
-import 'package:is_project_1/pages/legal_aid_pages/legal_aid_tips.dart';
 import 'package:is_project_1/pages/legal_aid_pages/legal_requests.dart';
 import 'package:is_project_1/pages/legal_aid_pages/my_tips.dart';
 import 'package:is_project_1/models/profile_response.dart';
-import 'package:is_project_1/pages/login_page.dart';
 import 'package:is_project_1/services/api_service.dart';
 
 class LegalAidHomepage extends StatefulWidget {
@@ -17,7 +15,7 @@ class LegalAidHomepage extends StatefulWidget {
 
 class _LegalAidHomepageState extends State<LegalAidHomepage> {
   ProfileResponse? profile;
-   bool isLoading = true;
+  bool isLoading = true;
   String? error;
   @override
   void initState() {
@@ -35,11 +33,9 @@ class _LegalAidHomepageState extends State<LegalAidHomepage> {
       // Load profile data
       final profileData = await ApiService.getProfile();
 
-    
-      
       setState(() {
         profile = profileData;
-  
+
         isLoading = false;
       });
     } catch (e) {
@@ -49,8 +45,6 @@ class _LegalAidHomepageState extends State<LegalAidHomepage> {
       });
     }
   }
-
-
 
   @override
   Widget build(BuildContext context) {
@@ -99,13 +93,13 @@ class _LegalAidHomepageState extends State<LegalAidHomepage> {
             ),
             const SizedBox(height: 4),
             Text(
-                                  profile?.name.isNotEmpty == true
-                                      ? profile!.name[0].toUpperCase()
-                                      : 'U',
-                                  style: const TextStyle(
-                                    fontSize: 32,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.white,
+              profile?.name.isNotEmpty == true
+                  ? profile!.name[0].toUpperCase()
+                  : 'U',
+              style: const TextStyle(
+                fontSize: 32,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
               ),
             ),
             const SizedBox(height: 24),
@@ -226,11 +220,10 @@ class _LegalAidHomepageState extends State<LegalAidHomepage> {
                 ),
               ],
             ),
-            
+
             const SizedBox(height: 16),
 
             // Activity Items (placeholder)
-            
           ],
         ),
       ),

@@ -7,24 +7,24 @@ import 'legal_aid_request_form.dart';
 class LegalAidProviderDetail extends StatelessWidget {
   final LegalAidProvider provider;
 
-  const LegalAidProviderDetail({Key? key, required this.provider})
-    : super(key: key);
+  const LegalAidProviderDetail({super.key, required this.provider});
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[50],
+      // Match user homepage background
+      backgroundColor: const Color(0xFFF5F3FF),
       appBar: AppBar(
-        backgroundColor: Colors.white,
+        backgroundColor: const Color(0xFF4FABCB),
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.black),
+          icon: const Icon(Icons.arrow_back, color: Colors.white),
           onPressed: () => Navigator.of(context).pop(),
         ),
         title: const Text(
           'Provider Details',
           style: TextStyle(
-            color: Colors.black,
+            color: Colors.white,
             fontSize: 18,
             fontWeight: FontWeight.w600,
           ),
@@ -60,10 +60,11 @@ class LegalAidProviderDetail extends StatelessWidget {
                     backgroundImage: provider.profileImage != null
                         ? MemoryImage(base64Decode(provider.profileImage!))
                         : AssetImage('assets/images/default_profile.png')
-                              as ImageProvider,
-                    backgroundColor: Colors.blue[100],
+                            as ImageProvider,
+                    backgroundColor: const Color(0xFF4FABCB),
                     child: provider.profileImage == null
-                        ? Icon(Icons.person, color: Colors.blue[600], size: 50)
+                        ? const Icon(Icons.person,
+                            color: Colors.white, size: 50)
                         : null,
                   ),
 
@@ -113,11 +114,8 @@ class LegalAidProviderDetail extends StatelessWidget {
 
             // Contact Information
             _buildInfoSection('Lawyer background', [
-              _buildInfoRow(
-                Icons.description,
-                'About',
-                provider.about ?? 'Lawyer information not available',
-              ),
+              // Provide an appropriate IconData
+              Text(provider.about ?? 'Lawyer information not available'),
             ]),
 
             const SizedBox(height: 20),
@@ -125,9 +123,16 @@ class LegalAidProviderDetail extends StatelessWidget {
             // Expertise Areas
             _buildInfoSection(
               'Areas of Expertise',
-              provider.expertiseAreas
-                  .map((area) => _buildExpertiseChip(area.name))
-                  .toList(),
+              provider.expertiseAreas.isNotEmpty
+                  ? provider.expertiseAreas.map((area) {
+                      return _buildExpertiseChip(area.name);
+                    }).toList()
+                  : [
+                      const Text(
+                        'No expertise areas available',
+                        style: TextStyle(color: Colors.grey),
+                      ),
+                    ],
             ),
 
             const SizedBox(height: 32),
@@ -145,7 +150,7 @@ class LegalAidProviderDetail extends StatelessWidget {
                   );
                 },
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF4FC3F7),
+                  backgroundColor: const Color(0xFF4FABCB),
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(vertical: 16),
                   shape: RoundedRectangleBorder(
@@ -156,7 +161,7 @@ class LegalAidProviderDetail extends StatelessWidget {
                 child: const Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(Icons.request_quote, size: 20),
+                    Icon(Icons.people_outline, size: 20),
                     SizedBox(width: 8),
                     Text(
                       'Request Services',
@@ -240,9 +245,9 @@ class LegalAidProviderDetail extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.blue[50],
+        color: const Color(0xFF4FABCB).withOpacity(0.06),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.blue[200]!),
+        border: Border.all(color: const Color(0xFF4FABCB)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -252,7 +257,7 @@ class LegalAidProviderDetail extends StatelessWidget {
             style: TextStyle(
               fontSize: 14,
               fontWeight: FontWeight.w600,
-              color: Colors.blue[800],
+              color: const Color(0xFF4FABCB),
             ),
           ),
         ],

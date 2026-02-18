@@ -1,247 +1,182 @@
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:is_project_1/models/legal_tips_models.dart';
-import 'package:flutter/material.dart';
 import 'package:timeago/timeago.dart' as timeago;
 import 'dart:convert';
 import 'dart:typed_data';
 
-class LegalTipDetailPage extends StatelessWidget {
+class LegalTipDetailPage extends StatefulWidget {
   final LegalTip tip;
 
-  LegalTipDetailPage({required this.tip});
+  const LegalTipDetailPage({super.key, required this.tip});
 
-  // Enhanced base64 validation
-  bool isBase64(String str) {
+  @override
+  State<LegalTipDetailPage> createState() => _LegalTipDetailPageState();
+}
+
+class _LegalTipDetailPageState extends State<LegalTipDetailPage> {
+  String _baseUrl = 'https://d2d35afcbdcd.ngrok-free.app'; // fallback
+
+  @override
+  void initState() {
+    super.initState();
+    _loadEnv();
+  }
+
+  Future<void> _loadEnv() async {
+    try {
+      await dotenv.load(fileName: '.env');
+      setState(() {
+        _baseUrl = dotenv.env['API_BASE_URL'] ?? _baseUrl;
+      });
+    } catch (e) {
+      debugPrint('Error loading .env: $e');
+    }
+  }
+
+  // ── Image helpers ───────────────────────────────────────────────────────────
+
+  bool _isBase64(String str) {
     try {
       if (str.isEmpty) return false;
-      
-      // Remove data URI prefix if present
-      String base64String = str;
-      if (str.contains(',')) {
-        base64String = str.split(',').last;
-      }
-      
-      // Check if it's a valid base64 string
-      if (base64String.isEmpty) return false;
-      
-      // Basic base64 format validation
+      final s = str.contains(',') ? str.split(',').last : str;
+      if (s.isEmpty) return false;
       final base64RegExp = RegExp(r'^[A-Za-z0-9+/]*={0,2}$');
-      if (!base64RegExp.hasMatch(base64String)) return false;
-      
-      // Try to decode
-      base64Decode(base64String);
+      if (!base64RegExp.hasMatch(s)) return false;
+      base64Decode(s);
       return true;
-    } catch (e) {
-      print('Base64 validation error: $e');
+    } catch (_) {
       return false;
     }
   }
 
-  // Get clean base64 data
-  String getBase64Data(String base64String) {
-    if (base64String.contains(',')) {
-      return base64String.split(',').last;
-    }
-    return base64String;
-  }
+  String _getBase64Data(String str) =>
+      str.contains(',') ? str.split(',').last : str;
 
-  // Enhanced URL validation
-  bool isValidUrl(String url) {
+  bool _isValidUrl(String url) {
     try {
       if (url.isEmpty) return false;
-      
-      Uri uri = Uri.parse(url);
-      return uri.hasScheme && 
-             (uri.scheme == 'http' || uri.scheme == 'https') &&
-             uri.host.isNotEmpty;
-    } catch (e) {
-      print('URL validation error: $e');
+      final uri = Uri.parse(url);
+      return uri.hasScheme &&
+          (uri.scheme == 'http' || uri.scheme == 'https') &&
+          uri.host.isNotEmpty;
+    } catch (_) {
       return false;
     }
   }
 
-  // Check if string is a local file path
-  bool isLocalFilePath(String path) {
-    return path.startsWith('/uploads/') || 
-           path.startsWith('uploads/') ||
-           path.contains('/uploads/');
+  bool _isLocalPath(String path) =>
+      path.startsWith('/uploads/') ||
+      path.startsWith('uploads/') ||
+      path.contains('/uploads/');
+
+  // Uses the env-loaded base URL instead of a hardcoded string
+  String _buildFullUrl(String imagePath) {
+    if (imagePath.startsWith('/')) return '$_baseUrl$imagePath';
+    return '$_baseUrl/$imagePath';
   }
 
-  // Convert local file path to full URL
-  String buildFullImageUrl(String imagePath) {
-    // Replace with your actual server base URL
-    const String baseUrl = 'https://b0b2bb2b9a75.ngrok-free.app'; // UPDATE THIS!
-    
-    if (imagePath.startsWith('/')) {
-      return '$baseUrl$imagePath';
-    } else {
-      return '$baseUrl/$imagePath';
-    }
-  }
+  bool _isDataUri(String str) =>
+      str.startsWith('data:image/') && str.contains(';base64,');
 
-  // Check if string looks like a data URI
-  bool isDataUri(String str) {
-    return str.startsWith('data:image/') && str.contains(';base64,');
-  }
+  // ── Image widget ────────────────────────────────────────────────────────────
 
   Widget _buildImageWidget() {
-    print('=== IMAGE DEBUG INFO ===');
-    print('Image URL: ${tip.imageUrl}');
-    print('Image URL length: ${tip.imageUrl?.length ?? 0}');
-    print('Image URL type: ${tip.imageUrl.runtimeType}');
-    
-    if (tip.imageUrl == null || tip.imageUrl!.isEmpty) {
-      print('No image URL provided');
-      return _buildPlaceholderImage();
+    if (widget.tip.imageUrl == null || widget.tip.imageUrl!.isEmpty) {
+      return _placeholder();
     }
 
-    final imageUrl = tip.imageUrl!.trim();
-    print('Trimmed image URL: ${imageUrl.substring(0, imageUrl.length > 100 ? 100 : imageUrl.length)}...');
+    final imageUrl = widget.tip.imageUrl!.trim();
 
-    // Check if it's a local file path and convert to full URL
-    if (isLocalFilePath(imageUrl)) {
-      print('Detected local file path - converting to full URL');
-      final fullUrl = buildFullImageUrl(imageUrl);
-      print('Full URL: $fullUrl');
-      
-      return CachedNetworkImage(
-        imageUrl: fullUrl,
-        fit: BoxFit.cover,
-        width: double.infinity,
-        height: 250,
-        placeholder: (context, url) => Container(
-          color: Colors.grey.shade200,
-          child: const Center(
-            child: CircularProgressIndicator(),
-          ),
-        ),
-        errorWidget: (context, url, error) {
-          print('CachedNetworkImage error: $error');
-          print('Failed URL: $url');
-          return _buildPlaceholderImage();
-        },
-      );
+    // Local server path → build full URL using env base URL
+    if (_isLocalPath(imageUrl)) {
+      return _networkImage(_buildFullUrl(imageUrl));
     }
 
-    // Check if it's a data URI (data:image/...;base64,...)
-    if (isDataUri(imageUrl)) {
-      print('Detected data URI format');
-      try {
-        Uint8List imageBytes = base64Decode(getBase64Data(imageUrl));
-        print('Successfully decoded base64 data, bytes length: ${imageBytes.length}');
-        
-        return ClipRRect(
-          borderRadius: BorderRadius.circular(0),
-          child: Image.memory(
-            imageBytes,
-            fit: BoxFit.cover,
-            width: double.infinity,
-            height: 250,
-            errorBuilder: (context, error, stackTrace) {
-              print('Image.memory error: $error');
-              print('Stack trace: $stackTrace');
-              return _buildPlaceholderImage();
-            },
-          ),
-        );
-      } catch (e) {
-        print('Data URI decode error: $e');
-        return _buildPlaceholderImage();
-      }
+    // data:image/...;base64,...
+    if (_isDataUri(imageUrl)) {
+      return _memoryImage(_getBase64Data(imageUrl));
     }
-    
-    // Check if it's base64 without data URI prefix
-    if (isBase64(imageUrl)) {
-      print('Detected base64 format');
-      try {
-        Uint8List imageBytes = base64Decode(getBase64Data(imageUrl));
-        print('Successfully decoded base64 data, bytes length: ${imageBytes.length}');
-        
-        return ClipRRect(
-          borderRadius: BorderRadius.circular(0),
-          child: Image.memory(
-            imageBytes,
-            fit: BoxFit.cover,
-            width: double.infinity,
-            height: 250,
-            errorBuilder: (context, error, stackTrace) {
-              print('Image.memory error: $error');
-              print('Stack trace: $stackTrace');
-              return _buildPlaceholderImage();
-            },
-          ),
-        );
-      } catch (e) {
-        print('Base64 decode error: $e');
-        return _buildPlaceholderImage();
-      }
+
+    // Raw base64
+    if (_isBase64(imageUrl)) {
+      return _memoryImage(_getBase64Data(imageUrl));
     }
-    
-    // Check if it's a valid URL
-    if (isValidUrl(imageUrl)) {
-      print('Detected valid URL format');
-      return CachedNetworkImage(
-        imageUrl: imageUrl,
-        fit: BoxFit.cover,
-        width: double.infinity,
-        height: 250,
-        placeholder: (context, url) => Container(
-          color: Colors.grey.shade200,
-          child: const Center(
-            child: CircularProgressIndicator(),
-          ),
-        ),
-        errorWidget: (context, url, error) {
-          print('CachedNetworkImage error: $error');
-          print('Failed URL: $url');
-          return _buildPlaceholderImage();
-        },
-      );
+
+    // Full http/https URL
+    if (_isValidUrl(imageUrl)) {
+      return _networkImage(imageUrl);
     }
-    
-    // If nothing matches, show placeholder
-    print('Image format not recognized - showing placeholder');
-    return _buildPlaceholderImage();
+
+    return _placeholder();
   }
 
-  Widget _buildPlaceholderImage() {
-    return Container(
-      width: double.infinity,
-      height: 250,
-      decoration: BoxDecoration(
-        color: Colors.blue.shade50,
-        border: Border.all(color: Colors.blue.shade200, width: 1),
-      ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.lightbulb_outline,
-            color: Colors.blue.shade400,
-            size: 60,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Legal Tip',
-            style: TextStyle(
-              color: Colors.blue.shade600,
-              fontSize: 16,
-              fontWeight: FontWeight.w500,
+  Widget _networkImage(String url) => CachedNetworkImage(
+        imageUrl: url,
+        fit: BoxFit.cover,
+        width: double.infinity,
+        height: 250,
+        placeholder: (_, __) => Container(
+          color: Colors.grey.shade200,
+          height: 250,
+          child: const Center(child: CircularProgressIndicator()),
+        ),
+        errorWidget: (_, __, ___) => _placeholder(),
+      );
+
+  Widget _memoryImage(String base64Data) {
+    try {
+      final bytes = base64Decode(base64Data);
+      return Image.memory(
+        bytes,
+        fit: BoxFit.cover,
+        width: double.infinity,
+        height: 250,
+        errorBuilder: (_, __, ___) => _placeholder(),
+      );
+    } catch (_) {
+      return _placeholder();
+    }
+  }
+
+  Widget _placeholder() => Container(
+        width: double.infinity,
+        height: 250,
+        decoration: BoxDecoration(
+          color: Colors.blue.shade50,
+          border: Border.all(color: Colors.blue.shade200),
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.lightbulb_outline,
+                color: Colors.blue.shade400, size: 60),
+            const SizedBox(height: 8),
+            Text(
+              'Legal Tip',
+              style: TextStyle(
+                color: Colors.blue.shade600,
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
+              ),
             ),
-          ),
-        ],
-      ),
-    );
-  }
+          ],
+        ),
+      );
+
+  // ── Build ───────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
+    final tip = widget.tip;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text(
           'Legal Tip',
-          style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold),
+          style: TextStyle(
+              color: Colors.black87, fontWeight: FontWeight.bold),
         ),
         backgroundColor: Colors.white,
         elevation: 0,
@@ -253,7 +188,7 @@ class LegalTipDetailPage extends StatelessWidget {
           IconButton(
             icon: const Icon(Icons.share, color: Colors.black87),
             onPressed: () {
-              // Implement share functionality
+              // TODO: implement share
             },
           ),
         ],
@@ -262,10 +197,9 @@ class LegalTipDetailPage extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Hero Image with enhanced error handling
+            // Hero image
             _buildImageWidget(),
 
-            // Content
             Padding(
               padding: const EdgeInsets.all(20),
               child: Column(
@@ -281,9 +215,10 @@ class LegalTipDetailPage extends StatelessWidget {
                       height: 1.3,
                     ),
                   ),
+
                   const SizedBox(height: 16),
 
-                  // Provider and Date Info
+                  // Provider + date card
                   Container(
                     padding: const EdgeInsets.all(16),
                     decoration: BoxDecoration(
@@ -293,18 +228,16 @@ class LegalTipDetailPage extends StatelessWidget {
                     ),
                     child: Row(
                       children: [
-                        Icon(
-                          Icons.person,
-                          color: Colors.grey.shade600,
-                          size: 20,
-                        ),
+                        Icon(Icons.person,
+                            color: Colors.grey.shade600, size: 20),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                tip.legalAidProvider?.fullName ?? 'Legal Provider',
+                                tip.legalAidProvider?.fullName ??
+                                    'Legal Provider',
                                 style: const TextStyle(
                                   fontSize: 16,
                                   fontWeight: FontWeight.w600,
@@ -325,12 +258,13 @@ class LegalTipDetailPage extends StatelessWidget {
                       ],
                     ),
                   ),
+
                   const SizedBox(height: 24),
 
                   // Description
-                  Text(
+                  const Text(
                     'Description',
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.bold,
                       color: Colors.black87,
@@ -345,11 +279,9 @@ class LegalTipDetailPage extends StatelessWidget {
                       height: 1.6,
                     ),
                   ),
-                  const SizedBox(height: 32),
 
-                  ]  // Enhanced Debug info (remove in production)
-                  
-                  
+                  const SizedBox(height: 32),
+                ],
               ),
             ),
           ],

@@ -129,7 +129,7 @@ def create_user(db: Session, user: CreateUser):
     db_user = User(
         full_name=user.full_name,
         phone_number=user.phone_number,
-        email=user.email,
+        email=user.email.lower(),
         password_hash=hashed_password,
         role_id=user.role_id,
         profile_image=user.profile_image,
@@ -170,7 +170,7 @@ def create_legal_aid(db: Session, legal_aid: CreateLegalAid):
     db_legal_aid = LegalAidProvider(
         full_name=legal_aid.full_name,
         phone_number=legal_aid.phone_number,
-        email=legal_aid.email,
+        email=legal_aid.email.lower(),
         password_hash=hashed_password,
         status=legal_aid.status,
         role_id=legal_aid.role_id,

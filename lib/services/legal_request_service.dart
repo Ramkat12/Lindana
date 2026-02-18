@@ -14,10 +14,10 @@ class LegalRequestService {
     try {
       await dotenv.load(fileName: ".env");
       _baseUrl =
-          dotenv.env['API_BASE_URL'] ?? 'https://b0b2bb2b9a75.ngrok-free.app';
+          dotenv.env['API_BASE_URL'] ?? 'https://d2d35afcbdcd.ngrok-free.app';
     } catch (e) {
       print('Error loading .env file: $e');
-      _baseUrl = 'http://localhost:8000';
+      _baseUrl = 'https://d2d35afcbdcd.ngrok-free.app';
     }
 
     _isInitialized = true;

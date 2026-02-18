@@ -1,13 +1,13 @@
 import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'package:is_project_1/components/custom_admin.navbar.dart';
-import 'package:is_project_1/components/custom_blank_navbar.dart';
 import 'package:is_project_1/components/custom_bootom_navbar.dart';
 import 'package:is_project_1/components/custom_legal_navbar.dart';
 import 'package:is_project_1/models/profile_response.dart';
 import 'package:is_project_1/pages/login_page.dart';
 import 'package:is_project_1/pages/user_pages/user_analytics.dart';
 import 'package:is_project_1/services/api_service.dart'; // Import your API service
+import 'package:is_project_1/pages/user_pages/voice_activation_page.dart';
 
 class ProfilePage extends StatefulWidget {
   const ProfilePage({super.key});
@@ -132,10 +132,7 @@ class _ProfilePageState extends State<ProfilePage> {
         ),
         backgroundColor: Colors.white,
         elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.black87),
-          onPressed: () => Navigator.pop(context),
-        ),
+
         actions: [
           Stack(
             children: [
@@ -378,6 +375,20 @@ class _ProfilePageState extends State<ProfilePage> {
                               ).then(
                                 (_) => _loadProfileData(),
                               ); // Refresh on return
+                            },
+                          ),
+                          const SizedBox(height: 12),
+                          _buildActionButton(
+                            'Voice Activation Settings',
+                            Colors.teal,
+                            Icons.mic,
+                            () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (context) => const VoiceActivationPage(),
+                                ),
+                              );
                             },
                           ),
                           const SizedBox(height: 40),

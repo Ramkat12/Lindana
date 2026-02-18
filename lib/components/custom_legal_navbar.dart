@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:is_project_1/pages/legal_aid_pages/legal_aid_cases_page.dart';
 import 'package:is_project_1/pages/legal_aid_pages/legal_aid_clients_page.dart';
 import 'package:is_project_1/pages/legal_aid_pages/legal_aid_tips.dart';
 import 'package:is_project_1/pages/legal_aid_pages/legalaid_homepage.dart';

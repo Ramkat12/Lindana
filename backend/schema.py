@@ -548,7 +548,7 @@ class PoliceLocationBase(BaseModel):
     name: str
     latitude: float
     longitude: float
-    contact_number: str
+   
 
 
 
@@ -556,26 +556,26 @@ class PoliceLocationCreate(BaseModel):
     name: str
     latitude: float
     longitude: float
-    contact_number: str
+  
 
 class PoliceLocationUpdate(BaseModel):
     name: str
     latitude: float
     longitude: float
-    contact_number: str
+   
 
 class PoliceLocationShow(PoliceLocationBase):
     id: int
     name: str
     latitude:float
     longitude: float
-    contact_number: str
+  
 class PoliceLocationResponse(BaseModel):
     id: int
     name: str
     latitude: float
     longitude: float
-    contact_number: str
+    
 
 
     model_config = {

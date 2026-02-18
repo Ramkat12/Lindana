@@ -291,7 +291,7 @@ class PoliceLocation(Base):
     name = Column(String(255), nullable=False)
     latitude = Column(DECIMAL(9, 6), nullable=False)
     longitude = Column(DECIMAL(9, 6), nullable=False)
-    contact_number = Column(String(20), nullable=False)
+    
 
 
 

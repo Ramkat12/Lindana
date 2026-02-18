@@ -1,8 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:is_project_1/pages/user_pages/map_page.dart';
 import 'package:is_project_1/pages/profile_page.dart';
-import 'package:is_project_1/pages/user_pages/user_homepage.dart';
-import 'package:is_project_1/pages/user_pages/user_legalaid.dart';
 
 class CustomBlankNavigationBar extends StatelessWidget {
   final dynamic currentIndex;

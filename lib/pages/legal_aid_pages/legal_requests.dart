@@ -10,6 +10,8 @@ void main() {
 }
 
 class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -25,7 +27,7 @@ class MyApp extends StatelessWidget {
 }
 
 class LegalRequestsScreen extends StatefulWidget {
-  const LegalRequestsScreen({Key? key}) : super(key: key);
+  const LegalRequestsScreen({super.key});
 
   @override
   _LegalRequestsScreenState createState() => _LegalRequestsScreenState();
@@ -656,6 +658,7 @@ class _LegalRequestsScreenState extends State<LegalRequestsScreen>
             ],
           ),
         ),
+        bottomNavigationBar: const CustomLegalNavigationBar(currentIndex: 0),
       );
     }
 
@@ -679,39 +682,6 @@ class _LegalRequestsScreenState extends State<LegalRequestsScreen>
           ],
         ),
         actions: [
-          IconButton(
-            icon: Stack(
-              children: [
-                Icon(Icons.notifications_outlined, color: Colors.black),
-                if (pendingRequests.isNotEmpty)
-                  Positioned(
-                    right: 0,
-                    top: 0,
-                    child: Container(
-                      padding: EdgeInsets.all(2),
-                      decoration: BoxDecoration(
-                        color: Colors.red,
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      constraints: BoxConstraints(minWidth: 12, minHeight: 12),
-                      child: Text(
-                        '${pendingRequests.length}',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 8,
-                          fontWeight: FontWeight.bold,
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-            onPressed: () {
-              // Navigate to notifications or show pending requests
-              _tabController.animateTo(0);
-            },
-          ),
           IconButton(
             icon: Icon(Icons.refresh, color: Colors.black),
             onPressed: _loadRequests,
@@ -799,6 +769,9 @@ class _LegalRequestsScreenState extends State<LegalRequestsScreen>
           ),
         ],
       ),
+      // Always show the legal aid navbar on this screen so that
+      // providers have consistent navigation while managing requests.
+      bottomNavigationBar: const CustomLegalNavigationBar(currentIndex: 0),
     );
   }
 

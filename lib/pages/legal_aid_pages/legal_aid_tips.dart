@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:image_picker/image_picker.dart';
 import 'package:is_project_1/components/custom_legal_navbar.dart';
 import 'package:is_project_1/models/legal_tips_models.dart';
+import 'package:is_project_1/pages/legal_aid_pages/legalaid_homepage.dart';
 import 'package:is_project_1/pages/legal_aid_pages/my_tips.dart' hide LegalTip;
 import 'package:jwt_decoder/jwt_decoder.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -14,10 +15,10 @@ class AddLegalTipScreen extends StatefulWidget {
   final LegalTip? existingTip; // For editing existing tips
 
   const AddLegalTipScreen({
-    Key? key,
+    super.key,
     required this.legalAidProviderId,
     this.existingTip,
-  }) : super(key: key);
+  });
 
   @override
   _AddLegalTipScreenState createState() => _AddLegalTipScreenState();
@@ -28,7 +29,7 @@ class _AddLegalTipScreenState extends State<AddLegalTipScreen> {
   final _titleController = TextEditingController();
   final _descriptionController = TextEditingController();
   final ImagePicker _imagePicker = ImagePicker();
-  String baseUrl = 'https://b0b2bb2b9a75.ngrok-free.app';
+  String baseUrl = 'https://2da6347a111f.ngrok-free.app';
 
   File? _selectedImage;
   bool _isLoading = false;
@@ -153,9 +154,24 @@ class _AddLegalTipScreenState extends State<AddLegalTipScreen> {
         backgroundColor: Colors.white,
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.black),
-          onPressed: () => Navigator.of(context).pop(),
+          icon: const Icon(Icons.arrow_back, color: Colors.black87),
+          onPressed: () {
+            if (Navigator.canPop(context)) {
+              Navigator.pop(context);
+            } else {
+              // Handle case when there's no previous page
+              // You can navigate to a specific page or show a message
+              Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const LegalAidHomepage(),
+                ),
+                (route) => false,
+              ); // Replace with your home route
+            }
+          },
         ),
+
         title: Text(
           _isEditing ? 'Edit Legal Tip' : 'Add Legal Tip',
           style: const TextStyle(

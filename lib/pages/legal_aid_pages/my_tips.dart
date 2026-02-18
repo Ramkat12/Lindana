@@ -4,7 +4,7 @@ import 'package:is_project_1/models/legal_tips_models.dart';
 import 'package:is_project_1/services/legal_tips_service.dart';
 
 class MyTipsScreen extends StatefulWidget {
-  const MyTipsScreen({Key? key}) : super(key: key);
+  const MyTipsScreen({super.key});
 
   @override
   _MyTipsScreenState createState() => _MyTipsScreenState();
@@ -337,11 +337,11 @@ class _MyTipsScreenState extends State<MyTipsScreen>
           const SizedBox(height: 24),
           ElevatedButton(
             onPressed: _refreshTips,
-            child: const Text('Retry'),
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.blue,
               foregroundColor: Colors.white,
             ),
+            child: const Text('Retry'),
           ),
         ],
       ),

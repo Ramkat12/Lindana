@@ -405,7 +405,7 @@ class _LegalAidClientsPageState extends State<LegalAidClientsPage> {
             radius: 20,
             backgroundColor: avatarColor.withOpacity(0.2),
             child: Text(
-              user?.fullName?.isNotEmpty == true
+              user?.fullName.isNotEmpty == true
                   ? user!.fullName[0].toUpperCase()
                   : '?',
               style: TextStyle(

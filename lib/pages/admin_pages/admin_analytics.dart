@@ -5,6 +5,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:http/http.dart' as http;
 import 'package:is_project_1/components/custom_admin.navbar.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:is_project_1/pages/admin_pages/admin_homepage.dart';
 /*
 class UserDistribution {
   final int totalUsers;
@@ -71,7 +72,7 @@ class _AdminAnalyticsPageState extends State<AdminAnalyticsPage> {
   //UserDistribution? userDistribution;
   DangerZonesData? dangerZonesData;
 
-  String baseUrl = 'https://b0b2bb2b9a75.ngrok-free.app';
+  String baseUrl = 'https://d2d35afcbdcd.ngrok-free.app';
 
   @override
   void initState() {
@@ -198,8 +199,20 @@ class _AdminAnalyticsPageState extends State<AdminAnalyticsPage> {
         backgroundColor: Colors.white,
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.black),
-          onPressed: () => Navigator.pop(context),
+          icon: const Icon(Icons.arrow_back, color: Colors.black87),
+          onPressed: () {
+            if (Navigator.canPop(context)) {
+              Navigator.pop(context);
+            } else {
+              // Handle case when there's no previous page
+              // You can navigate to a specific page or show a message
+              Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute(builder: (context) => const AdminHomepage()),
+                (route) => false,
+              ); // Replace with your home route
+            }
+          },
         ),
         title: const Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -588,11 +601,11 @@ class _AdminAnalyticsPageState extends State<AdminAnalyticsPage> {
             ),
             const SizedBox(height: 24),
             // Scrollable chart container
-            Container(
+            SizedBox(
               height: 350, // Increased height to accommodate rotated labels
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
-                child: Container(
+                child: SizedBox(
                   width: chartWidth,
                   height: 350,
                   child: BarChart(

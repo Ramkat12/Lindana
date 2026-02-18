@@ -296,10 +296,11 @@ class ApiService {
     try {
       await dotenv.load(fileName: ".env");
       baseUrl =
-          dotenv.env['API_BASE_URL'] ?? 'https://b0b2bb2b9a75.ngrok-free.app';
+          dotenv.env['API_BASE_URL'] ?? 'https://284d-102-208-82-84.ngrok-free.app';
     } catch (e) {
       print('Error loading .env file: $e');
-      baseUrl = 'http://localhost:8000';
+      baseUrl =
+          '                                                                                                             ';
     }
 
     /// Get emergency contacts

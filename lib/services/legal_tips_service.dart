@@ -1,4 +1,3 @@
-// legal_tips_service.dart
 import 'dart:io';
 import 'dart:convert';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
@@ -6,50 +5,37 @@ import 'package:http/http.dart' as http;
 import 'package:is_project_1/models/legal_tips_models.dart';
 import 'package:is_project_1/services/api_service.dart';
 
-// Models
-
 class ApiResponse<T> {
   final bool success;
   final T? data;
   final String? error;
   final int? statusCode;
-
   ApiResponse({required this.success, this.data, this.error, this.statusCode});
 }
 
 class LegalTipsService {
-  static String baseUrl =
-      'https://b0b2bb2b9a75.ngrok-free.app'; // Initialize with default value
+  // ── Dynamic base URL — reads from .env every time ──────────────────────────
+  String get baseUrl =>
+      dotenv.env['API_BASE_URL'] ?? 'https://d2d35afcbdcd.ngrok-free.app';
 
   Future<Map<String, String>> _headers() async {
     final token = await ApiService.getToken();
-    if (token == null) {
-      throw Exception("Missing auth token");
-    }
-
+    if (token == null) throw Exception('Missing auth token');
     return {
       'Content-Type': 'application/json',
       'Authorization': 'Bearer $token',
     };
   }
 
-  // Convert File to base64
   Future<String> _fileToBase64(File file) async {
     try {
       final bytes = await file.readAsBytes();
       final base64String = base64Encode(bytes);
-
-      // Determine MIME type
-      String mimeType = 'image/jpeg'; // default
-      final extension = file.path.split('.').last.toLowerCase();
-
-      switch (extension) {
+      String mimeType = 'image/jpeg';
+      final ext = file.path.split('.').last.toLowerCase();
+      switch (ext) {
         case 'png':
           mimeType = 'image/png';
-          break;
-        case 'jpg':
-        case 'jpeg':
-          mimeType = 'image/jpeg';
           break;
         case 'gif':
           mimeType = 'image/gif';
@@ -58,14 +44,13 @@ class LegalTipsService {
           mimeType = 'image/webp';
           break;
       }
-
       return 'data:$mimeType;base64,$base64String';
     } catch (e) {
       throw Exception('Error converting image to base64: $e');
     }
   }
 
-  // Create legal tip
+  // ── Create ─────────────────────────────────────────────────────────────────
   Future<ApiResponse<LegalTip>> createLegalTip({
     required String title,
     required String description,
@@ -75,9 +60,7 @@ class LegalTipsService {
   }) async {
     try {
       String? imageBase64;
-      if (imageFile != null) {
-        imageBase64 = await _fileToBase64(imageFile);
-      }
+      if (imageFile != null) imageBase64 = await _fileToBase64(imageFile);
 
       final request = CreateLegalTipRequest(
         title: title,
@@ -94,10 +77,9 @@ class LegalTipsService {
       );
 
       if (response.statusCode == 200 || response.statusCode == 201) {
-        final data = jsonDecode(response.body);
         return ApiResponse<LegalTip>(
           success: true,
-          data: LegalTip.fromJson(data),
+          data: LegalTip.fromJson(jsonDecode(response.body)),
         );
       } else {
         final error = jsonDecode(response.body);
@@ -112,7 +94,7 @@ class LegalTipsService {
     }
   }
 
-  // Update legal tip
+  // ── Update ─────────────────────────────────────────────────────────────────
   Future<ApiResponse<LegalTip>> updateLegalTip({
     required String tipId,
     String? title,
@@ -123,9 +105,8 @@ class LegalTipsService {
   }) async {
     try {
       String? imageBase64;
-
       if (removeImage == true) {
-        imageBase64 = ''; // Empty string to remove image
+        imageBase64 = '';
       } else if (imageFile != null) {
         imageBase64 = await _fileToBase64(imageFile);
       }
@@ -139,15 +120,14 @@ class LegalTipsService {
 
       final response = await http.put(
         Uri.parse('$baseUrl/api/v1/legal-tips/$tipId/update'),
-        headers: await _headers(), // Fixed: await the headers
+        headers: await _headers(),
         body: jsonEncode(request.toJson()),
       );
 
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
         return ApiResponse<LegalTip>(
           success: true,
-          data: LegalTip.fromJson(data),
+          data: LegalTip.fromJson(jsonDecode(response.body)),
         );
       } else {
         final error = jsonDecode(response.body);
@@ -162,7 +142,7 @@ class LegalTipsService {
     }
   }
 
-  // Get all legal tips
+  // ── Get all ────────────────────────────────────────────────────────────────
   Future<ApiResponse<List<LegalTip>>> getLegalTips({
     int skip = 0,
     int limit = 100,
@@ -175,29 +155,21 @@ class LegalTipsService {
         'skip': skip.toString(),
         'limit': limit.toString(),
       };
-
-      if (statusFilter != null) {
+      if (statusFilter != null)
         queryParams['status_filter'] = statusFilter.toString().split('.').last;
-      }
-      if (providerId != null) {
-        queryParams['provider_id'] = providerId;
-      }
-      if (search != null && search.isNotEmpty) {
-        queryParams['search'] = search;
-      }
+      if (providerId != null) queryParams['provider_id'] = providerId;
+      if (search != null && search.isNotEmpty) queryParams['search'] = search;
 
       final uri = Uri.parse(
         '$baseUrl/api/v1/legal-tips',
       ).replace(queryParameters: queryParams);
 
-      final response = await http.get(
-        uri,
-        headers: await _headers(),
-      ); // Fixed: await the headers
+      final response = await http.get(uri, headers: await _headers());
 
       if (response.statusCode == 200) {
-        final List<dynamic> data = jsonDecode(response.body);
-        final tips = data.map((json) => LegalTip.fromJson(json)).toList();
+        final tips = (jsonDecode(response.body) as List)
+            .map((j) => LegalTip.fromJson(j))
+            .toList();
         return ApiResponse<List<LegalTip>>(success: true, data: tips);
       } else {
         final error = jsonDecode(response.body);
@@ -215,19 +187,18 @@ class LegalTipsService {
     }
   }
 
-  // Get specific legal tip
+  // ── Get specific tip ───────────────────────────────────────────────────────
   Future<ApiResponse<LegalTip>> getLegalTip(String tipId) async {
     try {
       final response = await http.get(
         Uri.parse('$baseUrl/api/v1/legal-tips/$tipId'),
-        headers: await _headers(), // Fixed: await the headers
+        headers: await _headers(),
       );
 
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
         return ApiResponse<LegalTip>(
           success: true,
-          data: LegalTip.fromJson(data),
+          data: LegalTip.fromJson(jsonDecode(response.body)),
         );
       } else {
         final error = jsonDecode(response.body);
@@ -242,7 +213,7 @@ class LegalTipsService {
     }
   }
 
-  // Update tip status
+  // ── Update status ──────────────────────────────────────────────────────────
   Future<ApiResponse<LegalTip>> updateTipStatus({
     required String tipId,
     required TipStatus status,
@@ -250,15 +221,14 @@ class LegalTipsService {
     try {
       final response = await http.patch(
         Uri.parse('$baseUrl/api/v1/legal-tips/$tipId/status'),
-        headers: await _headers(), // Fixed: await the headers
+        headers: await _headers(),
         body: jsonEncode({'new_status': status.toString().split('.').last}),
       );
 
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
         return ApiResponse<LegalTip>(
           success: true,
-          data: LegalTip.fromJson(data),
+          data: LegalTip.fromJson(jsonDecode(response.body)),
         );
       } else {
         final error = jsonDecode(response.body);
@@ -273,12 +243,12 @@ class LegalTipsService {
     }
   }
 
-  // Delete legal tip
+  // ── Delete ─────────────────────────────────────────────────────────────────
   Future<ApiResponse<void>> deleteLegalTip(String tipId) async {
     try {
       final response = await http.delete(
         Uri.parse('$baseUrl/api/v1/legal-tips/$tipId'),
-        headers: await _headers(), // Fixed: await the headers
+        headers: await _headers(),
       );
 
       if (response.statusCode == 200) {
@@ -296,7 +266,7 @@ class LegalTipsService {
     }
   }
 
-  // Get tips by provider
+  // ── Get by provider ────────────────────────────────────────────────────────
   Future<ApiResponse<List<LegalTip>>> getTipsByProvider({
     required String providerId,
     int skip = 0,
@@ -308,23 +278,19 @@ class LegalTipsService {
         'skip': skip.toString(),
         'limit': limit.toString(),
       };
-
-      if (statusFilter != null) {
+      if (statusFilter != null)
         queryParams['status_filter'] = statusFilter.toString().split('.').last;
-      }
 
       final uri = Uri.parse(
         '$baseUrl/api/v1/legal-tips/provider/$providerId',
       ).replace(queryParameters: queryParams);
 
-      final response = await http.get(
-        uri,
-        headers: await _headers(),
-      ); // Fixed: await the headers
+      final response = await http.get(uri, headers: await _headers());
 
       if (response.statusCode == 200) {
-        final List<dynamic> data = jsonDecode(response.body);
-        final tips = data.map((json) => LegalTip.fromJson(json)).toList();
+        final tips = (jsonDecode(response.body) as List)
+            .map((j) => LegalTip.fromJson(j))
+            .toList();
         return ApiResponse<List<LegalTip>>(success: true, data: tips);
       } else {
         final error = jsonDecode(response.body);
@@ -342,19 +308,20 @@ class LegalTipsService {
     }
   }
 
-  // Get recent published tips
+  // ── Get recent published ───────────────────────────────────────────────────
   Future<ApiResponse<List<LegalTip>>> getRecentPublishedTips({
     int limit = 10,
   }) async {
     try {
       final response = await http.get(
         Uri.parse('$baseUrl/api/v1/legal-tips/published/recent?limit=$limit'),
-        headers: await _headers(), // Fixed: await the headers
+        headers: await _headers(),
       );
 
       if (response.statusCode == 200) {
-        final List<dynamic> data = jsonDecode(response.body);
-        final tips = data.map((json) => LegalTip.fromJson(json)).toList();
+        final tips = (jsonDecode(response.body) as List)
+            .map((j) => LegalTip.fromJson(j))
+            .toList();
         return ApiResponse<List<LegalTip>>(success: true, data: tips);
       } else {
         final error = jsonDecode(response.body);
@@ -372,7 +339,7 @@ class LegalTipsService {
     }
   }
 
-  // Upload base64 image separately
+  // ── Upload base64 image ────────────────────────────────────────────────────
   Future<ApiResponse<String>> uploadBase64Image({
     required String base64Data,
     String? filename,
@@ -380,7 +347,7 @@ class LegalTipsService {
     try {
       final response = await http.post(
         Uri.parse('$baseUrl/api/v1/legal-tips/upload-base64-image'),
-        headers: await _headers(), // Fixed: await the headers
+        headers: await _headers(),
         body: jsonEncode({'image_data': base64Data, 'filename': filename}),
       );
 
@@ -400,28 +367,13 @@ class LegalTipsService {
     }
   }
 
-  // Helper method to publish a draft tip
-  Future<ApiResponse<LegalTip>> publishTip(String tipId) async {
-    return updateTipStatus(tipId: tipId, status: TipStatus.published);
-  }
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  Future<ApiResponse<LegalTip>> publishTip(String tipId) =>
+      updateTipStatus(tipId: tipId, status: TipStatus.published);
 
-  // Helper method to save as draft
-  Future<ApiResponse<LegalTip>> saveAsDraft(String tipId) async {
-    return updateTipStatus(tipId: tipId, status: TipStatus.draft);
-  }
+  Future<ApiResponse<LegalTip>> saveAsDraft(String tipId) =>
+      updateTipStatus(tipId: tipId, status: TipStatus.draft);
 
-  // Helper method to archive tip
-  Future<ApiResponse<LegalTip>> archiveTip(String tipId) async {
-    return updateTipStatus(tipId: tipId, status: TipStatus.archived);
-  }
-
-  static Future<void> loadEnv() async {
-    try {
-      await dotenv.load(fileName: ".env");
-      baseUrl = dotenv.env['API_BASE_URL'] ?? 'http://localhost:8000';
-    } catch (e) {
-      print('Error loading .env file: $e');
-      baseUrl = 'http://localhost:8000';
-    }
-  }
+  Future<ApiResponse<LegalTip>> archiveTip(String tipId) =>
+      updateTipStatus(tipId: tipId, status: TipStatus.archived);
 }

@@ -5,10 +5,12 @@ import 'package:is_project_1/pages/user_pages/legal_aid_request_form.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'package:is_project_1/components/custom_bootom_navbar.dart';
+
 import '../../services/legal_request_service.dart'; // Updated import
 
 class LegalRequestsScreen extends StatefulWidget {
-  const LegalRequestsScreen({Key? key}) : super(key: key);
+  const LegalRequestsScreen({super.key});
 
   @override
   _LegalRequestsScreenState createState() => _LegalRequestsScreenState();
@@ -61,9 +63,7 @@ class _LegalRequestsScreenState extends State<LegalRequestsScreen> {
             final provider = await LegalRequestService.fetchProviderById(
               providerId,
             );
-            if (provider != null) {
-              providers[providerId] = provider;
-            }
+            providers[providerId] = provider;
           } catch (e) {
             print('Error fetching provider $providerId: $e');
             // Create a fallback provider if needed
@@ -123,18 +123,20 @@ class _LegalRequestsScreenState extends State<LegalRequestsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[50],
+      // Match user homepage background
+      backgroundColor: const Color(0xFFF5F3FF),
       appBar: AppBar(
-        backgroundColor: Colors.white,
+        // Teal header like other user pages
+        backgroundColor: const Color(0xFF4FABCB),
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.black),
+          icon: const Icon(Icons.arrow_back, color: Colors.white),
           onPressed: () => Navigator.of(context).pop(),
         ),
         title: const Text(
           'Legal Requests',
           style: TextStyle(
-            color: Colors.black,
+            color: Colors.white,
             fontSize: 18,
             fontWeight: FontWeight.w600,
           ),
@@ -142,18 +144,21 @@ class _LegalRequestsScreenState extends State<LegalRequestsScreen> {
         centerTitle: true,
         actions: [
           IconButton(
-            icon: const Icon(Icons.add, color: Colors.blue),
+            icon: const Icon(Icons.add, color: Colors.white),
             onPressed: () {
               _showCreateRequestDialog();
             },
           ),
           IconButton(
-            icon: const Icon(Icons.refresh, color: Colors.blue),
+            icon: const Icon(Icons.refresh, color: Colors.white),
             onPressed: _loadRequests,
           ),
         ],
       ),
       body: _buildBody(),
+      // Ensure regular users always see their own navbar while
+      // viewing their legal aid requests (Legal Aid tab = index 1).
+      bottomNavigationBar: const CustomBottomNavigationBar(currentIndex: 1),
     );
   }
 
@@ -167,7 +172,8 @@ class _LegalRequestsScreenState extends State<LegalRequestsScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.error_outline, size: 64, color: Colors.grey[400]),
+            const Icon(Icons.error_outline,
+                size: 64, color: Color(0xFF4FABCB)),
             const SizedBox(height: 16),
             Text(
               _error!,
@@ -189,7 +195,8 @@ class _LegalRequestsScreenState extends State<LegalRequestsScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.inbox_outlined, size: 64, color: Colors.grey[400]),
+            const Icon(Icons.inbox_outlined,
+                size: 64, color: Color(0xFF4FABCB)),
             const SizedBox(height: 16),
             Text(
               'No legal requests found',
@@ -214,28 +221,24 @@ class _LegalRequestsScreenState extends State<LegalRequestsScreen> {
             // Active Requests Section
             if (_activeRequests.isNotEmpty) ...[
               _buildSectionHeader('Active Requests', _activeRequests.length),
-              ..._activeRequests
-                  .map(
-                    (request) => Padding(
-                      padding: const EdgeInsets.only(bottom: 16),
-                      child: _buildActiveRequestCard(request),
-                    ),
-                  )
-                  .toList(),
+              ..._activeRequests.map(
+                (request) => Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: _buildActiveRequestCard(request),
+                ),
+              ),
               const SizedBox(height: 24),
             ],
 
             // Past Requests Section
             if (_pastRequests.isNotEmpty) ...[
               _buildSectionHeader('Past Requests', _pastRequests.length),
-              ..._pastRequests
-                  .map(
-                    (request) => Padding(
-                      padding: const EdgeInsets.only(bottom: 16),
-                      child: _buildPastRequestCard(request),
-                    ),
-                  )
-                  .toList(),
+              ..._pastRequests.map(
+                (request) => Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: _buildPastRequestCard(request),
+                ),
+              ),
             ],
 
             const SizedBox(height: 20),
@@ -676,7 +679,7 @@ class _LegalRequestsScreenState extends State<LegalRequestsScreen> {
       );
     }
 
-    void _rateRequest(LegalAidRequest request, String providerName) {
+    void rateRequest(LegalAidRequest request, String providerName) {
       showDialog(
         context: context,
         builder: (BuildContext context) {

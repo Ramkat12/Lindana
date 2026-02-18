@@ -8,10 +8,10 @@ class LegalAidDetailsPage extends StatelessWidget {
   final LegalAidProvider provider;
 
   const LegalAidDetailsPage({
-    Key? key,
+    super.key,
     required this.request,
     required this.provider,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {

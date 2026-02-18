@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:http/http.dart' as http;
-import 'package:is_project_1/components/custom_admin.navbar.dart';
+import 'package:is_project_1/components/custom_bootom_navbar.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import 'package:geocoding/geocoding.dart';
@@ -166,7 +166,7 @@ class _UserAnalyticsState extends State<UserAnalytics> {
   DangerZonesData? dangerZonesData;
   LocationAnalytics? locationAnalytics;
 
-  String baseUrl = 'https://b0b2bb2b9a75.ngrok-free.app';
+  String baseUrl = 'https://f77c2776a833.ngrok-free.app';
 
   @override
   void initState() {
@@ -417,7 +417,11 @@ class _UserAnalyticsState extends State<UserAnalytics> {
                 ),
               ),
             ),
-      bottomNavigationBar: const CustomAdminNavigationBar(currentIndex: 2),
+      // Use the regular user bottom navigation bar so that
+      // users never see admin navigation while viewing analytics.
+      // We keep the "Profile" tab highlighted since analytics
+      // is accessed from the profile page.
+      bottomNavigationBar: const CustomBottomNavigationBar(currentIndex: 3),
     );
   }
 
@@ -519,7 +523,7 @@ class _UserAnalyticsState extends State<UserAnalytics> {
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 12),
-              Container(
+              SizedBox(
                 height: 200,
                 child: ListView.builder(
                   itemCount: locationAnalytics!.recentActivities.length,
@@ -706,7 +710,7 @@ class _UserAnalyticsState extends State<UserAnalytics> {
                     ],
                   ),
                 );
-              }).toList(),
+              }),
             ],
           ],
         ),
@@ -815,11 +819,11 @@ class _UserAnalyticsState extends State<UserAnalytics> {
             ),
             const SizedBox(height: 24),
             // Scrollable chart container
-            Container(
+            SizedBox(
               height: 350, // Increased height to accommodate rotated labels
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
-                child: Container(
+                child: SizedBox(
                   width: chartWidth,
                   height: 350,
                   child: BarChart(

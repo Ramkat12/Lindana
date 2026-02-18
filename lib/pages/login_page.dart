@@ -2,16 +2,14 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:is_project_1/components/app_logo.dart';
 import 'package:is_project_1/components/my_button.dart';
 import 'package:is_project_1/components/my_textfield.dart';
 import 'package:is_project_1/pages/admin_pages/admin_homepage.dart';
 import 'package:is_project_1/pages/legal_aid_pages/legalaid_homepage.dart';
 import 'package:is_project_1/pages/register_page.dart';
 import 'package:is_project_1/pages/user_pages/user_homepage.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:is_project_1/services/auth_service.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -20,40 +18,26 @@ class LoginPage extends StatefulWidget {
   State<LoginPage> createState() => _LoginPageState();
 }
 
-class _LoginPageState extends State<LoginPage> {
+class _LoginPageState extends State<LoginPage>
+    with SingleTickerProviderStateMixin {
   final usernameController = TextEditingController();
   final passwordController = TextEditingController();
   bool isLoading = false;
   bool _obscurePassword = true;
-  String baseUrl = 'https://b0b2bb2b9a75.ngrok-free.app'; // Default fallback
+  late AnimationController _animationController;
+  late Animation<double> _fadeAnimation;
 
   @override
   void initState() {
     super.initState();
-    loadEnv();
-  }
-
-  Future<void> loadEnv() async {
-    try {
-      await dotenv.load(fileName: ".env");
-      setState(() {
-        baseUrl = dotenv.env['API_BASE_URL'] ?? baseUrl;
-      });
-    } catch (e) {
-      print('Error loading .env file: $e');
-    }
-  }
-
-  // Your deployed Vercel API URL for now we'll use the local Ip cause vercel did that thing:(
-
-  Map<String, dynamic> decodeJWT(String token) {
-    final parts = token.split('.');
-    if (parts.length != 3) throw Exception('Invalid token');
-
-    final payload = parts[1];
-    final normalized = base64Url.normalize(payload);
-    final decoded = utf8.decode(base64Url.decode(normalized));
-    return json.decode(decoded);
+    _animationController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1500),
+    );
+    _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _animationController, curve: Curves.easeIn),
+    );
+    _animationController.forward();
   }
 
   void signUserIn() async {
@@ -68,7 +52,7 @@ class _LoginPageState extends State<LoginPage> {
 
     try {
       final response = await http.post(
-        Uri.parse('$baseUrl/login'),
+        Uri.parse('${AuthService.baseUrl}/login'),
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: {
           'username': usernameController.text.trim(),
@@ -79,44 +63,29 @@ class _LoginPageState extends State<LoginPage> {
       if (response.statusCode == 200) {
         final Map responseData = json.decode(response.body);
 
-        await storeTokens(
+        await AuthService.storeTokens(
           responseData['access_token'],
           responseData['refresh_token'],
         );
 
-        // Decode the JWT to get role information
-        try {
-          final tokenPayload = decodeJWT(responseData['access_token']);
-          int roleId = tokenPayload['role_id'];
-          final prefs = await SharedPreferences.getInstance();
+        final roleId = await AuthService.getCurrentUserRole();
 
-          final userId = tokenPayload['sub']; // this is the user ID
-
-          // Save user_id to SharedPreferences
-          await prefs.setString('user_id', userId);
-
-          if (mounted) {
-            Widget destinationPage;
-            if (roleId == 4) {
-              destinationPage = const AdminHomepage();
-            } else if (roleId == 6) {
-              destinationPage = const LegalAidHomepage();
-            } else {
-              destinationPage = const UserHomepage();
-            }
-            final userId = tokenPayload['sub']; // Save UUID from token
-            await prefs.setString('user_id', userId);
-
-            Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(builder: (context) => destinationPage),
-            );
-
-            showSuccessMessage('Login successful!');
+        if (mounted && roleId != null) {
+          Widget destinationPage;
+          if (roleId == 4) {
+            destinationPage = const AdminHomepage();
+          } else if (roleId == 6) {
+            destinationPage = const LegalAidHomepage();
+          } else {
+            destinationPage = const UserHomepage();
           }
-        } catch (e) {
-          showErrorMessage('Authentication error. Please try again.');
-          print('JWT decode error: $e');
+
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (context) => destinationPage),
+          );
+
+          showSuccessMessage('Login successful!');
         }
       } else if (response.statusCode == 400) {
         final Map<String, dynamic> errorData = json.decode(response.body);
@@ -136,32 +105,23 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
-  // Store tokens securely using shared_preferences
-  Future<void> storeTokens(String accessToken, String refreshToken) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('access_token', accessToken);
-    await prefs.setString('refresh_token', refreshToken);
-  }
-
-  // Show error message
   void showErrorMessage(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
-        backgroundColor: Colors.red,
+        backgroundColor: Colors.red.shade600,
         duration: const Duration(seconds: 3),
       ),
     );
   }
 
-  // Show success message
   void showSuccessMessage(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
-        backgroundColor: Colors.green,
+        backgroundColor: Colors.green.shade600,
         duration: const Duration(seconds: 2),
       ),
     );
@@ -170,128 +130,244 @@ class _LoginPageState extends State<LoginPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[300],
+      backgroundColor: const Color(0xFFF5F3FF), // Mild lilac background
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                //logo
-                AppLogo(imagePath: 'assets/images/app_logo.png'),
+            padding: const EdgeInsets.symmetric(horizontal: 24.0),
+            child: FadeTransition(
+              opacity: _fadeAnimation,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const SizedBox(height: 40),
 
-                const SizedBox(height: 30),
-
-                //welcome textfield
-                Text(
-                  'LOG IN :)',
-                  style: TextStyle(
-                    color: Colors.grey[700],
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-
-                const SizedBox(height: 25),
-                //phone number or email
-                MyTextfield(
-                  controller: usernameController,
-                  hintText: 'Email or Phone Number',
-                  obscureText: false,
-                ),
-                //password textfield
-                const SizedBox(height: 7),
-                MyTextfield(
-                  controller: passwordController,
-                  hintText: 'Password',
-                  obscureText: _obscurePassword,
-                  suffixIcon: IconButton(
-                    icon: Icon(
-                      _obscurePassword
-                          ? Icons.visibility_off
-                          : Icons.visibility,
+                  // Logo
+                  const Text(
+                    'LINDANA',
+                    style: TextStyle(
+                      color: Color(0xFF4FABCB),
+                      fontSize: 34,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1.2,
                     ),
-                    onPressed: () {
-                      setState(() {
-                        _obscurePassword = !_obscurePassword;
-                      });
-                    },
                   ),
-                ),
-                const SizedBox(height: 10),
-                //forgot password?
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 25.0),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      Text(
-                        'Forgot Password',
-                        style: TextStyle(color: Colors.grey[600]),
-                      ),
-                    ],
-                  ),
-                ),
 
-                const SizedBox(height: 30),
-                //sign-in button with loading state
-                isLoading
-                    ? const CircularProgressIndicator()
-                    : MyButton(onTap: signUserIn),
+                  const SizedBox(height: 50),
 
-                //or continue with
-                const SizedBox(height: 25),
-
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 25.0),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Divider(thickness: 0.5, color: Colors.grey[400]),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 10.0),
-                        child: Text(
-                          'or continue with',
-                          style: TextStyle(color: Colors.grey[700]),
+                  // Sign-in card (starting from Welcome Back)
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(32),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: Colors.grey[300]!, width: 1.5),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.grey.withOpacity(0.08),
+                          blurRadius: 10,
+                          offset: const Offset(0, 4),
                         ),
-                      ),
-                      Expanded(
-                        child: Divider(thickness: 0.5, color: Colors.grey[400]),
-                      ),
-                    ],
-                  ),
-                ),
-
-                //Register
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      'Not a member ?',
-                      style: TextStyle(color: Colors.grey[700]),
+                      ],
                     ),
-                    const SizedBox(width: 4.0),
-                    GestureDetector(
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) => const RegisterPage(),
+                    child: Column(
+                      children: [
+                        // Welcome text
+                        const Text(
+                          'Welcome Back',
+                          style: TextStyle(
+                            color: Color(0xFF2D3748),
+                            fontSize: 28,
+                            fontWeight: FontWeight.w700,
                           ),
-                        );
-                      },
-                      child: const Text(
-                        'Register now',
-                        style: TextStyle(
-                          color: Colors.blue,
-                          fontWeight: FontWeight.bold,
                         ),
-                      ),
+
+                        const SizedBox(height: 8),
+
+                        Text(
+                          'Sign in to continue',
+                          style: TextStyle(
+                            color: Colors.grey[600],
+                            fontSize: 15,
+                          ),
+                        ),
+
+                        const SizedBox(height: 32),
+
+                        // Email/Phone field
+                        SizedBox(
+                          width: double.infinity,
+                          child: MyTextfield(
+                            controller: usernameController,
+                            hintText: 'Email or Phone Number',
+                            obscureText: false,
+                          ),
+                        ),
+
+                        const SizedBox(height: 16),
+
+                        // Password field
+                        SizedBox(
+                          width: double.infinity,
+                          child: MyTextfield(
+                            controller: passwordController,
+                            hintText: 'Password',
+                            obscureText: _obscurePassword,
+                            suffixIcon: IconButton(
+                              icon: Icon(
+                                _obscurePassword
+                                    ? Icons.visibility_off_rounded
+                                    : Icons.visibility_rounded,
+                                color: Colors.grey[500],
+                                size: 20,
+                              ),
+                              onPressed: () {
+                                setState(() {
+                                  _obscurePassword = !_obscurePassword;
+                                });
+                              },
+                            ),
+                          ),
+                        ),
+
+                        const SizedBox(height: 16),
+
+                        // Forgot password
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: GestureDetector(
+                            onTap: () {
+                              // TODO: Implement forgot password
+                            },
+                            child: const Text(
+                              'Forgot Password?',
+                              style: TextStyle(
+                                color: Color(0xFF4FABCB),
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+
+                        const SizedBox(height: 28),
+
+                        // Sign in button
+                        isLoading
+                            ? Container(
+                                width: double.infinity,
+                                height: 56,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF4FABCB),
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                                child: const Center(
+                                  child: SizedBox(
+                                    height: 22,
+                                    width: 22,
+                                    child: CircularProgressIndicator(
+                                      color: Colors.white,
+                                      strokeWidth: 2.5,
+                                    ),
+                                  ),
+                                ),
+                              )
+                            : GestureDetector(
+                                onTap: signUserIn,
+                                child: Container(
+                                  width: double.infinity,
+                                  height: 56,
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF4FABCB),
+                                    borderRadius: BorderRadius.circular(14),
+                                  ),
+                                  child: const Center(
+                                    child: Text(
+                                      'Sign In',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w600,
+                                        letterSpacing: 0.3,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+
+                        const SizedBox(height: 28),
+
+                        // Divider
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Divider(
+                                thickness: 0.5,
+                                color: Colors.grey[400],
+                              ),
+                            ),
+                            Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16.0,
+                              ),
+                              child: Text(
+                                'or',
+                                style: TextStyle(
+                                  color: Colors.grey[500],
+                                  fontSize: 14,
+                                ),
+                              ),
+                            ),
+                            Expanded(
+                              child: Divider(
+                                thickness: 0.5,
+                                color: Colors.grey[400],
+                              ),
+                            ),
+                          ],
+                        ),
+
+                        const SizedBox(height: 28),
+
+                        // Register link
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              'Don\'t have an account? ',
+                              style: TextStyle(
+                                color: Colors.grey[700],
+                                fontSize: 15,
+                              ),
+                            ),
+                            GestureDetector(
+                              onTap: () {
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (context) => const RegisterPage(),
+                                  ),
+                                );
+                              },
+                              child: const Text(
+                                'Register',
+                                style: TextStyle(
+                                  color: Color(0xFF4FABCB),
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
-                  ],
-                ),
-              ],
+                  ),
+
+                  const SizedBox(height: 40),
+                ],
+              ),
             ),
           ),
         ),
@@ -301,12 +377,14 @@ class _LoginPageState extends State<LoginPage> {
 
   @override
   void dispose() {
+    _animationController.dispose();
     usernameController.dispose();
     passwordController.dispose();
     super.dispose();
   }
 }
 
+// Keep all other classes unchanged
 class SuccessPage extends StatelessWidget {
   const SuccessPage({super.key});
 
@@ -320,6 +398,116 @@ class SuccessPage extends StatelessWidget {
           style: TextStyle(fontSize: 24),
         ),
       ),
+    );
+  }
+}
+
+class ExamplePageWithLogout extends StatelessWidget {
+  const ExamplePageWithLogout({super.key});
+
+  Future<void> _handleLogout(BuildContext context) async {
+    final shouldLogout = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Logout'),
+        content: const Text('Are you sure you want to logout?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Logout'),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldLogout == true) {
+      await AuthService.logout();
+
+      if (context.mounted) {
+        Navigator.pushAndRemoveUntil(
+          context,
+          MaterialPageRoute(builder: (context) => const LoginPage()),
+          (route) => false,
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Your Page'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.logout),
+            onPressed: () => _handleLogout(context),
+            tooltip: 'Logout',
+          ),
+        ],
+      ),
+      body: const Center(child: Text('Your page content here')),
+    );
+  }
+}
+
+class LogoutButton extends StatelessWidget {
+  final String? text;
+  final IconData? icon;
+  final VoidCallback? onLoggedOut;
+
+  const LogoutButton({super.key, this.text, this.icon, this.onLoggedOut});
+
+  Future<void> _handleLogout(BuildContext context) async {
+    final shouldLogout = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Logout'),
+        content: const Text('Are you sure you want to logout?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Logout'),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldLogout == true) {
+      await AuthService.logout();
+      onLoggedOut?.call();
+
+      if (context.mounted) {
+        Navigator.pushAndRemoveUntil(
+          context,
+          MaterialPageRoute(builder: (context) => const LoginPage()),
+          (route) => false,
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (text != null) {
+      return TextButton(
+        onPressed: () => _handleLogout(context),
+        child: Text(text!),
+      );
+    }
+
+    return IconButton(
+      icon: Icon(icon ?? Icons.logout),
+      onPressed: () => _handleLogout(context),
+      tooltip: 'Logout',
     );
   }
 }

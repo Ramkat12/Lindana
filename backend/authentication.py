@@ -2,10 +2,13 @@ import json
 import logging
 import traceback
 import uuid
+
 from sqlalchemy import UUID, func
-import authentication, locations
+
 from schema import RealTimeGPSLogCreate, RealTimeGPSLogShow
+
 from schema import ActivityCreate, ActivityShow, LocationSharingSessionCreate
+
 from schema import PoliceLocationCreate
 from schema import DangerZoneCreate, PoliceLocationUpdate,UserDistributionResponse, DangerZoneDataPoint, DangerZonesResponse, AnalyticsResponse,showExpertiseArea
 from schema import CreateLegalAidRequest, ShowLegalAidRequest
@@ -20,9 +23,13 @@ import httpx
 import legal_requests
 from calulate_distance import calculate_distance
 from sqlalchemy.orm import joinedload
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 from uuid import UUID 
+
 from fastapi import FastAPI, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from fastapi.security import OAuth2PasswordRequestForm
@@ -44,6 +51,7 @@ from fastapi.staticfiles import StaticFiles
 from safety_tips_page import router as safety_tips_router 
 from paypal import paypal_router
 from admin_routes import router as admin_router
+
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
@@ -56,60 +64,33 @@ from schema import SMSRequest, LocationSMSRequest, SMSResponse, LocationSMSRespo
 import asyncio
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
-import certifi
-import httpx
+
 load_dotenv()
 client = httpx.Client(verify=certifi.where())
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-app.include_router(safety_tips_router)
-app.include_router(paypal_router)
-app.include_router(admin_router)
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-security = HTTPBearer()
-sms_service = Africas_talking.AfricasTalkingService()
-app.include_router(legal_tips.router)
-app.include_router(legal_requests.router)
-app.include_router(legal_provider.router)
-app.include_router(locations.router)
-##app.include_router(authentication.router)
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30))
-REFRESH_TOKEN_EXPIRE_MINUTES = int(os.getenv("REFRESH_TOKEN_EXPIRE_MINUTES", 60 * 24 * 7))  # 7 days
-ALGORITHM = "HS256"
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-JWT_REFRESH_SECRET_KEY = os.getenv("JWT_REFRESH_SECRET_KEY")
-# Serve uploaded images as static files
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-router = APIRouter()
-active_connections = {}
-@app.get("/")
-async def root():
-    return {"message": "Hello from FastAPI!"}
-@app.post("/login", response_model=TokenSchema)
+
+
+router = APIRouter(prefix="",tags=["authentication"],dependencies=[Depends(get_current_user,)])
+
+@router.post("/login", response_model=TokenSchema)
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     print(f"--- Login Attempt: {form_data.username} ---")
+
     # User Query
     user = db.query(models.User).filter(
         (func.lower(models.User.email) == form_data.username.strip().lower()) |
         (models.User.phone_number == form_data.username)
     ).first()
+
     # Legal Aid Query
     legal_aid = db.query(models.LegalAidProvider).filter(
         (func.lower(models.LegalAidProvider.email) == form_data.username.strip().lower()) |
         (models.LegalAidProvider.phone_number == form_data.username)
     ).first()
+
     authenticated_user = None
     user_type = None
     role_id = None  # Initialize explicitly
-    
+
     if user:
          print(f"User found: {user.id}, Role: {user.role_id}")
          if verify_password(form_data.password, user.password_hash):
@@ -122,7 +103,8 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
              print(f"User password mismatch for {user.email}")
     else:
          print(f"User not found for {form_data.username}")
-    if legal_aid:
+
+    if not authenticated_user and legal_aid:
         print(f"Legal Aid found: {legal_aid.id}, Role: {legal_aid.role_id}")
         if verify_password(form_data.password, legal_aid.password_hash):
             authenticated_user = legal_aid
@@ -132,17 +114,29 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
             print(f"LEGAL_AID Authenticated - ID: {legal_aid.id}, role_id: {role_id}")
         else:
              print(f"Legal Aid password mismatch for {legal_aid.id}")
-    else:
+    elif not legal_aid:
         print(f"Legal Aid not found for {form_data.username}")
+
     if not authenticated_user:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid credentials"
         )
 
-    access_token = create_access_token(authenticated_user.id, user_type, role_id)
-    refresh_token = create_refresh_token(authenticated_user.id)
+    # Double-check role_id is not None
+    if role_id is None:
+        print(f"WARNING: role_id is None for user {authenticated_user.id}")
+        if user_type == "user":
+            role_result = db.query(models.User.role_id).filter(models.User.id == authenticated_user.id).first()
+        else:
+            role_result = db.query(models.LegalAidProvider.role_id).filter(models.LegalAidProvider.id == authenticated_user.id).first()
+        
+        role_id = role_result[0] if role_result else None
+        print(f"Direct role_id query result: {role_id}")
+
+    access_token = create_access_token(str(authenticated_user.id), user_type, role_id)
+    refresh_token = create_refresh_token(str(authenticated_user.id))
+    user_id = authenticated_user.id
 
     if user_type == "user":
         token_db = UserTokenTable(
@@ -151,7 +145,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
             refresh_token=refresh_token,
             status=True
         )
-    elif user_type == "legal_aid":
+    else:  # legal_aid
         token_db = LegalAidTokenTable(
             provider_id=authenticated_user.id,
             access_token=access_token,
@@ -164,13 +158,14 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     db.refresh(token_db)
     
     print(f"FINAL RESPONSE - role_id: {role_id}")
+
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
         "role_id": role_id,
         
     }
-@app.post("/register/user", response_model=ShowUser)
+@router.post("/register/user", response_model=ShowUser)
 def register_user(user: CreateUser, db: Session = Depends(get_db)):
     existing_user = db.query(models.User).filter(
         (models.User.phone_number == user.phone_number) |
@@ -184,7 +179,7 @@ def register_user(user: CreateUser, db: Session = Depends(get_db)):
         )
     created_user = crud.create_user(db, user)
     return created_user
-@app.post("/register/legal_aid_provider", response_model=ShowLegalAid)
+@router.post("/register/legal_aid_provider", response_model=ShowLegalAid)
 def register_legal_aid(legal_aid: CreateLegalAid, db: Session = Depends(get_db)):
     print("Received:", legal_aid.dict())  # Show incoming data
     existing_legal_aid_provider = db.query(models.LegalAidProvider).filter(
@@ -200,13 +195,13 @@ def register_legal_aid(legal_aid: CreateLegalAid, db: Session = Depends(get_db))
     created_legal_aid = crud.create_legal_aid(db, legal_aid)
     print("Created:", created_legal_aid)
     return created_legal_aid
-@app.get("/api/users/{user_id}", response_model=UserResponse)
+@router.get("/api/users/{user_id}", response_model=UserResponse)
 def get_user_by_id(user_id: UUID, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
-@app.post("/google/login", response_model=TokenSchema)
+@router.post("/google/login", response_model=TokenSchema)
 def google_login(token: str, db: Session = Depends(get_db)):
     response = requests.get(f'https://oauth2.googleapis.com/tokeninfo?id_token={token}')
     if response.status_code != 200:
@@ -239,11 +234,11 @@ def google_login(token: str, db: Session = Depends(get_db)):
         "access_token": access_token,
         "refresh_token": refresh_token
     }
-@app.get('/getusers', response_model=list[ShowUser])
+@router.get('/getusers', response_model=list[ShowUser])
 def getusers(db: Session = Depends(get_db), token: str = Depends(jwt_bearer)):
     users = db.query(models.User).all()
     return users
-@app.get("/expertise-areas", response_model=List[showExpertiseArea])
+@router.get("/expertise-areas", response_model=List[showExpertiseArea])
 async def get_expertise_areas(db: Session = Depends(get_db)):
     expertise_areas = db.query(models.ExpertiseArea).all()
     if not expertise_areas:
@@ -258,7 +253,7 @@ async def get_expertise_areas(db: Session = Depends(get_db)):
     
     return expertise_areas                  
     # 
-@app.post('/changePassword')
+@router.post('/changePassword')
 def change_password(request: changepassword, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.email == request.email).first()
     legal_aid = db.query(models.LegalAidProvider).filter(models.LegalAidProvider.email == request.email).first()
@@ -270,7 +265,7 @@ def change_password(request: changepassword, db: Session = Depends(get_db)):
     account.password_hash = get_password_hash(request.new_password)
     db.commit()
     return {"message": "Password changed successfully"}
-@app.post('/editProfile')
+@router.post('/editProfile')
 def edit_profile(request: editprofile, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # Get current user info from JWT token
     user_id = current_user["sub"]
@@ -339,7 +334,7 @@ def edit_profile(request: editprofile, db: Session = Depends(get_db), current_us
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update profile")
-@app.post('/logout')
+@router.post('/logout')
 def logout(token: str = Depends(jwt_bearer), db: Session = Depends(get_db)):
     try:
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
@@ -364,7 +359,7 @@ def logout(token: str = Depends(jwt_bearer), db: Session = Depends(get_db)):
     token_record.status = False
     db.commit()
     return {"message": "Logged out successfully"}
-@app.get("/emergency-contacts")
+@router.get("/emergency-contacts")
 def get_emergency_contacts(token: str = Depends(jwt_bearer), db: Session = Depends(get_db)):
     payload = decodeJWT(token)
     if not payload:
@@ -392,7 +387,7 @@ def get_emergency_contacts(token: str = Depends(jwt_bearer), db: Session = Depen
             "email_contact": contact.email_contact
         })
     return contacts_response
-@app.get("/profile")
+@router.get("/profile")
 def get_profile(token: str = Depends(jwt_bearer), db: Session = Depends(get_db)):
     print(f"DEBUG: Received token: {token[:50]}...")
     
@@ -499,7 +494,7 @@ def get_profile(token: str = Depends(jwt_bearer), db: Session = Depends(get_db))
         print(f"DEBUG: Unknown user_type: {user_type}")
         raise HTTPException(status_code=400, detail="Invalid user type")
     
-@app.get("/view-legal-aid-providers")
+@router.get("/view-legal-aid-providers")
 def view_legal_aid_providers(db: Session = Depends(get_db)):
     """View all legal aid providers"""
     try:
@@ -509,13 +504,4 @@ def view_legal_aid_providers(db: Session = Depends(get_db)):
         logger.error(f"Failed to fetch legal aid providers: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to fetch legal aid providers")
     
-@app.middleware("http")
-async def log_request(request: Request, call_next):
-    body = await request.body()
-    logging.info(f"Request body: {body.decode('utf-8')}")
-    
-    response = await call_next(request)
-    return response
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+

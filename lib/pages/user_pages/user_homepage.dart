@@ -2,67 +2,74 @@ import 'package:flutter/material.dart';
 import 'package:is_project_1/components/custom_bootom_navbar.dart';
 import 'package:is_project_1/models/profile_response.dart';
 import 'package:is_project_1/pages/user_pages/map_page.dart';
+import 'package:is_project_1/pages/user_pages/player.dart';
 import 'package:is_project_1/pages/user_pages/user_legalaid.dart';
+import 'package:is_project_1/pages/user_pages/videos.dart';
 import 'package:is_project_1/services/api_service.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'dart:convert';
+import 'dart:math';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:is_project_1/pages/user_pages/safety_tips_page.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:youtube_player_flutter/youtube_player_flutter.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart' as gmaps;
 
-class PoliceLocation {
+// ── Models ───────────────────────────────────────────────────────────────────
+
+class PoliceStation {
   final String name;
-  final double latitude;
-  final double longitude;
-  final String contactNumber;
-
-  PoliceLocation({
+  final double latitude, longitude;
+  PoliceStation({
     required this.name,
     required this.latitude,
     required this.longitude,
-    required this.contactNumber,
   });
-
-  factory PoliceLocation.fromJson(Map<String, dynamic> json) {
-    return PoliceLocation(
-      name: json['name'],
-      latitude: json['latitude'].toDouble(),
-      longitude: json['longitude'].toDouble(),
-      contactNumber: json['contact_number'],
-    );
-  }
+  factory PoliceStation.fromJson(Map<String, dynamic> j) => PoliceStation(
+    name: j['name'],
+    latitude: (j['latitude'] as num).toDouble(),
+    longitude: (j['longitude'] as num).toDouble(),
+  );
 }
 
-class UserHomepage extends StatefulWidget {
-  const UserHomepage({super.key});
+class DangerZone {
+  final String name, description;
+  final double latitude, longitude, radius;
+  DangerZone({
+    required this.name,
+    required this.description,
+    required this.latitude,
+    required this.longitude,
+    required this.radius,
+  });
+  factory DangerZone.fromJson(Map<String, dynamic> j) => DangerZone(
+    name: j['location_name'] ?? 'Unknown',
+    description: j['description'] ?? '',
+    latitude: (j['latitude'] as num).toDouble(),
+    longitude: (j['longitude'] as num).toDouble(),
+    radius: (j['radius'] as num?)?.toDouble() ?? 500.0,
+  );
+}
 
-  @override
-  State<UserHomepage> createState() => _UserHomepageState();
+class VideoInfo {
+  final String url;
+  final String? title;
+  VideoInfo({required this.url, this.title});
 }
 
 class SafetyTip {
-  final String title;
-  final String content;
-
+  final String title, content;
   SafetyTip({required this.title, required this.content});
-
-  factory SafetyTip.fromJson(Map<String, dynamic> json) {
-    return SafetyTip(
-      title: json['title'] ?? 'Untitled',
-      content: json['content'] ?? '',
-    );
-  }
+  factory SafetyTip.fromJson(Map<String, dynamic> j) =>
+      SafetyTip(title: j['title'] ?? 'Untitled', content: j['content'] ?? '');
 }
 
 class EducationalContent {
-  final String title;
-  final String content;
+  final String title, content, id;
   final double price;
   final bool isPaid;
-  final String id;
-
   EducationalContent({
     required this.id,
     required this.title,
@@ -70,93 +77,168 @@ class EducationalContent {
     required this.price,
     required this.isPaid,
   });
-
-  factory EducationalContent.fromJson(Map<String, dynamic> json) {
-    final rawPrice = json['price'];
-    final double safePrice = rawPrice != null
-        ? double.tryParse(rawPrice.toString()) ?? 0.0
-        : 0.0;
-
+  factory EducationalContent.fromJson(Map<String, dynamic> j) {
+    final raw = j['price'];
     return EducationalContent(
-      id: json['id'],
-      title: json['title'] ?? 'Untitled',
-      content: json['content'] ?? '',
-      price: safePrice,
-      isPaid: json['is_paid'] ?? true,
+      id: j['id'],
+      title: j['title'] ?? 'Untitled',
+      content: j['content'] ?? '',
+      price: raw != null ? double.tryParse(raw.toString()) ?? 0.0 : 0.0,
+      isPaid: j['is_paid'] ?? true,
     );
   }
 }
 
-class _UserHomepageState extends State<UserHomepage> {
-  String baseUrl = 'https://b0b2bb2b9a75.ngrok-free.app'; // Default fallback
+final _videoUrls = [
+  'https://www.youtube.com/watch?v=eANy2M_Filw',
+  'https://www.youtube.com/watch?v=7zhX02q-b5w',
+  'https://www.youtube.com/watch?v=uI4ATOriCIw',
+];
 
+// Simple data holder for a quick-action chip
+class _QuickAction {
+  final IconData icon;
+  final String label;
+  final Color color;
+  final VoidCallback onTap;
+  const _QuickAction({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.onTap,
+  });
+}
+
+// ── Haversine Formula ─────────────────────────────────────────────────────────
+// Returns distance in metres between two lat/lng points.
+// Formula: a = sin²(Δlat/2) + cos(lat1)·cos(lat2)·sin²(Δlng/2)
+//          c = 2·atan2(√a, √(1−a))
+//          d = R·c  where R = 6 371 000 m
+double _haversineMetres(double lat1, double lng1, double lat2, double lng2) {
+  const R = 6371000.0; // Earth's radius in metres
+  final dLat = _toRad(lat2 - lat1);
+  final dLng = _toRad(lng2 - lng1);
+  final a =
+      sin(dLat / 2) * sin(dLat / 2) +
+      cos(_toRad(lat1)) * cos(_toRad(lat2)) * sin(dLng / 2) * sin(dLng / 2);
+  final c = 2 * atan2(sqrt(a), sqrt(1 - a));
+  return R * c;
+}
+
+double _toRad(double deg) => deg * pi / 180.0;
+
+// ── Page ─────────────────────────────────────────────────────────────────────
+
+class UserHomepage extends StatefulWidget {
+  const UserHomepage({super.key});
+  @override
+  State<UserHomepage> createState() => _UserHomepageState();
+}
+
+class _UserHomepageState extends State<UserHomepage>
+    with SingleTickerProviderStateMixin {
+  // colours
+  static const _teal = Color(0xFF4FABCB);
+  static const _lilac = Color(0xFFF5F3FF);
+  static const _dark = Color(0xFF1A202C);
+  static const _purple = Color(0xFF7B61FF);
+  static const _green = Color(0xFF27AE60);
+  static const _red = Color(0xFFE53E3E);
+  static const _orange = Color(0xFFED8936);
+
+  // state
+  String baseUrl = 'https://0b1e-102-208-82-84.ngrok-free.app';
   ProfileResponse? profile;
-  List<EmergencyContact> emergencyContacts = [];
   bool isLoading = true;
-  String? error;
   List<SafetyTip> safetyTips = [];
   bool tipsLoading = true;
   List<EducationalContent> educationalItems = [];
   bool eduLoading = true;
   List<String> purchasedContentIds = [];
+  List<VideoInfo> videoInfoList = [];
+  bool videoLoading = true;
+  List<PoliceStation> policeStations = [];
+  bool policeLoading = true;
+  List<DangerZone> dangerZones = [];
+  bool dangerLoading = true;
+  Position? _currentPos;
+
+  // Map controller, markers & perimeter circles
+  gmaps.GoogleMapController? _mapController;
+  Set<gmaps.Marker> _mapMarkers = {};
+  Set<gmaps.Circle> _mapCircles = {};
+  bool _mapReady = false;
+
+  late AnimationController _heroCtrl;
+  late Animation<double> _heroAnim;
 
   @override
   void initState() {
     super.initState();
-    loadEnv();
-    _loadProfileData().then((_) async {
-      final userId = await _getUserIdFromToken();
-      if (userId != null) {
-        _fetchPurchasedContentIds(userId);
-      } else {
-        print("Failed to get user ID from token");
-      }
-    });
+    _heroCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    );
+    _heroAnim = CurvedAnimation(parent: _heroCtrl, curve: Curves.easeOut);
+    _heroCtrl.forward();
+    _initAll();
+  }
 
-    _fetchSafetyTips();
-    _fetchEducationalContent();
+  @override
+  void dispose() {
+    _heroCtrl.dispose();
+    _mapController?.dispose();
+    super.dispose();
+  }
+
+  Future<void> _initAll() async {
+    await loadEnv();
+    await _getLocation();
+    await Future.wait([
+      _loadProfile(),
+      _fetchSafetyTips(),
+      _fetchEducationalContent(),
+      _loadVideoInfo(),
+      _fetchPoliceStations(),
+      _fetchDangerZones(),
+    ]);
+    final userId = await _getUserId();
+    if (userId != null) _fetchPurchases(userId);
+    // Build map markers after all data is loaded
+    _rebuildMapMarkers();
   }
 
   Future<void> loadEnv() async {
     try {
-      await dotenv.load(fileName: ".env");
-      setState(() {
-        baseUrl = dotenv.env['API_BASE_URL'] ?? baseUrl;
-      });
-    } catch (e) {
-      print('Error loading .env file: $e');
-    }
+      await dotenv.load(fileName: '.env');
+      setState(() => baseUrl = dotenv.env['API_BASE_URL'] ?? baseUrl);
+    } catch (_) {}
   }
 
-  Future<void> _loadProfileData() async {
+  Future<void> _getLocation() async {
     try {
+      bool svc = await Geolocator.isLocationServiceEnabled();
+      if (!svc) return;
+      var perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied)
+        perm = await Geolocator.requestPermission();
+      if (perm == LocationPermission.denied ||
+          perm == LocationPermission.deniedForever)
+        return;
+      _currentPos = await Geolocator.getCurrentPosition();
+    } catch (_) {}
+  }
+
+  Future<void> _loadProfile() async {
+    try {
+      setState(() => isLoading = true);
+      final p = await ApiService.getProfile();
       setState(() {
-        isLoading = true;
-        error = null;
-      });
-
-      // Load profile data
-      final profileData = await ApiService.getProfile();
-
-      List<EmergencyContact> contacts = [];
-      if (profileData.roleId == 5) {
-        try {
-          contacts = await ApiService.getEmergencyContacts();
-        } catch (e) {
-          print('Failed to load emergency contacts: $e');
-        }
-      }
-
-      setState(() {
-        profile = profileData;
-        emergencyContacts = contacts;
+        profile = p;
         isLoading = false;
       });
-    } catch (e) {
-      setState(() {
-        error = e.toString();
-        isLoading = false;
-      });
+    } catch (_) {
+      setState(() => isLoading = false);
     }
   }
 
@@ -164,43 +246,24 @@ class _UserHomepageState extends State<UserHomepage> {
     try {
       final res = await http.get(Uri.parse('$baseUrl/get_tips'));
       if (res.statusCode == 200) {
-        final List<dynamic> data = jsonDecode(res.body);
+        final data = jsonDecode(res.body) as List;
         setState(() {
           safetyTips = data.map((e) => SafetyTip.fromJson(e)).toList();
           tipsLoading = false;
         });
       } else {
         setState(() => tipsLoading = false);
-        print("Failed to load safety tips: ${res.body}");
       }
-    } catch (e) {
-      print("Failed to load tips: $e");
+    } catch (_) {
       setState(() => tipsLoading = false);
     }
-  }
-
-  Future<String?> _getUserIdFromToken() async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('access_token');
-    if (token != null) {
-      try {
-        final payload = token.split('.')[1];
-        final normalized = base64Url.normalize(payload);
-        final decoded = utf8.decode(base64Url.decode(normalized));
-        final payloadMap = json.decode(decoded);
-        return payloadMap['sub']?.toString();
-      } catch (e) {
-        print('JWT decode error: $e');
-      }
-    }
-    return null;
   }
 
   Future<void> _fetchEducationalContent() async {
     try {
       final res = await http.get(Uri.parse('$baseUrl/get_educational_content'));
       if (res.statusCode == 200) {
-        final List<dynamic> data = jsonDecode(res.body);
+        final data = jsonDecode(res.body) as List;
         setState(() {
           educationalItems = data
               .map((e) => EducationalContent.fromJson(e))
@@ -210,337 +273,770 @@ class _UserHomepageState extends State<UserHomepage> {
       } else {
         setState(() => eduLoading = false);
       }
-    } catch (e) {
-      print("Failed to fetch educational content: $e");
+    } catch (_) {
       setState(() => eduLoading = false);
     }
   }
 
-  Future<void> _fetchPurchasedContentIds(String userId) async {
+  Future<void> _loadVideoInfo() async {
+    setState(() => videoLoading = true);
+    final futures = _videoUrls.map((url) async {
+      final id = YoutubePlayer.convertUrlToId(url);
+      if (id == null) return null;
+      try {
+        final res = await http.get(
+          Uri.parse(
+            'https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=$id&format=json',
+          ),
+        );
+        final title = res.statusCode == 200
+            ? jsonDecode(res.body)['title'] as String?
+            : null;
+        return VideoInfo(url: url, title: title ?? 'Educational Video');
+      } catch (_) {
+        return VideoInfo(url: url, title: 'Educational Video');
+      }
+    }).toList();
+    final results = await Future.wait(futures);
+    setState(() {
+      videoInfoList = results.whereType<VideoInfo>().toList();
+      videoLoading = false;
+    });
+  }
+
+  Future<void> _fetchPoliceStations() async {
+    try {
+      final lat = _currentPos?.latitude ?? -1.286389;
+      final lng = _currentPos?.longitude ?? 36.817223;
+      final res = await http.get(
+        Uri.parse(
+          '$baseUrl/nearby-police?latitude=$lat&longitude=$lng&radius=5000',
+        ),
+      );
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body)['nearby_police'] as List;
+        setState(() {
+          policeStations = data.map((e) => PoliceStation.fromJson(e)).toList();
+          policeLoading = false;
+        });
+      } else {
+        setState(() => policeLoading = false);
+      }
+    } catch (_) {
+      setState(() => policeLoading = false);
+    }
+  }
+
+  Future<void> _fetchDangerZones() async {
+    try {
+      final res = await http.get(Uri.parse('$baseUrl/danger-zones'));
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as List;
+        setState(() {
+          dangerZones = data.map((e) => DangerZone.fromJson(e)).toList();
+          dangerLoading = false;
+        });
+      } else {
+        setState(() => dangerLoading = false);
+      }
+    } catch (_) {
+      setState(() => dangerLoading = false);
+    }
+  }
+
+  Future<String?> _getUserId() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('access_token');
+    if (token == null) return null;
+    try {
+      final payload = token.split('.')[1];
+      final decoded = utf8.decode(
+        base64Url.decode(base64Url.normalize(payload)),
+      );
+      return json.decode(decoded)['sub']?.toString();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _fetchPurchases(String userId) async {
     try {
       final res = await http.get(Uri.parse('$baseUrl/user_purchases/$userId'));
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body);
-        setState(() {
-          purchasedContentIds = List<String>.from(data['purchased_ids']);
-        });
-        print("Purchased content: $purchasedContentIds");
-      } else {
-        print("Failed to fetch purchases: ${res.body}");
-      }
-    } catch (e) {
-      print("Error fetching purchases: $e");
-    }
+      if (res.statusCode == 200)
+        setState(
+          () => purchasedContentIds = List<String>.from(
+            jsonDecode(res.body)['purchased_ids'],
+          ),
+        );
+    } catch (_) {}
   }
 
-  Future<void> _startPaymentFlow(EducationalContent content) async {
-    final userId = await _getUserIdFromToken();
-    if (userId == null || userId == "0") {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            "You must be logged in with a valid account to purchase.",
-          ),
-        ),
-      );
-      return;
-    }
-
-    Future<void> capturePayment(String orderId, String contentId) async {
-      final response = await http.post(
-        Uri.parse('$baseUrl/capture-order/$orderId'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({"user_id": userId, "content_id": contentId}),
-      );
-
-      if (response.statusCode == 200) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text("Payment successful!")));
-        await _fetchPurchasedContentIds(userId);
-        setState(() {});
-      } else {
-        print(
-          "Capture payment failed: ${response.statusCode} ${response.body}",
-        );
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Payment failed to capture.")),
-        );
-      }
-    }
-
-    final response = await http.post(
-      Uri.parse('$baseUrl/create-order'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        "user_id": userId,
-        "content_id": content.id,
-        "content_title": content.title,
-        "amount": content.price.toString(),
-        "currency": "USD",
-      }),
+  // ── Haversine distance label ─────────────────────────────────────────────
+  // Returns a human-readable string and the raw distance in metres.
+  String _distanceLabel(double lat, double lng) {
+    if (_currentPos == null) return '';
+    final d = _haversineMetres(
+      _currentPos!.latitude,
+      _currentPos!.longitude,
+      lat,
+      lng,
     );
+    return d < 1000
+        ? '${d.toStringAsFixed(0)}m away'
+        : '${(d / 1000).toStringAsFixed(1)}km away';
+  }
 
-    if (response.statusCode != 200) {
-      print("Create order failed: ${response.statusCode} ${response.body}");
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Failed to create PayPal order.")),
-      );
-      return;
-    }
-
-    final data = jsonDecode(response.body);
-    final orderId = data["order_id"];
-    final approvalUrl = data["approval_url"];
-
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => Scaffold(
-          appBar: AppBar(title: const Text("Complete Payment")),
-          body: WebViewWidget(
-            controller: WebViewController()
-              ..setJavaScriptMode(JavaScriptMode.unrestricted)
-              ..loadRequest(Uri.parse(approvalUrl))
-              ..setNavigationDelegate(
-                NavigationDelegate(
-                  onNavigationRequest: (nav) async {
-                    if (nav.url.contains("payment-success")) {
-                      await capturePayment(orderId, content.id);
-                      Navigator.pop(context, true);
-                      return NavigationDecision.prevent;
-                    }
-                    return NavigationDecision.navigate;
-                  },
-                ),
-              ),
-          ),
-        ),
-      ),
+  double _distanceMetres(double lat, double lng) {
+    if (_currentPos == null) return double.infinity;
+    return _haversineMetres(
+      _currentPos!.latitude,
+      _currentPos!.longitude,
+      lat,
+      lng,
     );
   }
 
+  // ── Filtered lists: only items within 5 km ───────────────────────────────
+  static const double _mapRadiusMetres = 5000.0; // 5 km
+
+  List<PoliceStation> get _nearbyPolice =>
+      _currentPos == null
+            ? policeStations
+            : policeStations
+                  .where(
+                    (p) =>
+                        _distanceMetres(p.latitude, p.longitude) <=
+                        _mapRadiusMetres,
+                  )
+                  .toList()
+        ..sort(
+          (a, b) => _distanceMetres(
+            a.latitude,
+            a.longitude,
+          ).compareTo(_distanceMetres(b.latitude, b.longitude)),
+        );
+
+  List<DangerZone> get _nearbyDangerZones =>
+      _currentPos == null
+            ? dangerZones
+            : dangerZones
+                  .where(
+                    (z) =>
+                        _distanceMetres(z.latitude, z.longitude) <=
+                        _mapRadiusMetres,
+                  )
+                  .toList()
+        ..sort(
+          (a, b) => _distanceMetres(
+            a.latitude,
+            a.longitude,
+          ).compareTo(_distanceMetres(b.latitude, b.longitude)),
+        );
+
+  // ── Build Google Maps markers + 5km perimeter circle ────────────────────
+  void _rebuildMapMarkers() {
+    final Set<gmaps.Marker> markers = {};
+    final Set<gmaps.Circle> circles = {};
+
+    // 5 km perimeter circle centred on the user
+    if (_currentPos != null) {
+      circles.add(
+        gmaps.Circle(
+          circleId: const gmaps.CircleId('perimeter_5km'),
+          center: gmaps.LatLng(_currentPos!.latitude, _currentPos!.longitude),
+          radius: _mapRadiusMetres,
+          strokeColor: const Color(0xFF4FABCB), // teal border
+          strokeWidth: 2,
+          fillColor: const Color(
+            0xFF4FABCB,
+          ).withOpacity(0.07), // very subtle teal fill
+        ),
+      );
+
+      // ── Black pulsating user-location circle ──────────────────────────
+      // Outer "pulse" ring — semi-transparent black
+      circles.add(
+        gmaps.Circle(
+          circleId: const gmaps.CircleId('user_pulse'),
+          center: gmaps.LatLng(_currentPos!.latitude, _currentPos!.longitude),
+          radius: 120, // visual pulse ring
+          strokeColor: Colors.black.withOpacity(0.25),
+          strokeWidth: 2,
+          fillColor: Colors.black.withOpacity(0.08),
+        ),
+      );
+      // Inner solid black dot
+      circles.add(
+        gmaps.Circle(
+          circleId: const gmaps.CircleId('user_dot'),
+          center: gmaps.LatLng(_currentPos!.latitude, _currentPos!.longitude),
+          radius: 40,
+          strokeColor: Colors.black,
+          strokeWidth: 3,
+          fillColor: Colors.black.withOpacity(0.85),
+        ),
+      );
+    }
+
+    for (final p in _nearbyPolice) {
+      markers.add(
+        gmaps.Marker(
+          markerId: gmaps.MarkerId('police_${p.name}'),
+          position: gmaps.LatLng(p.latitude, p.longitude),
+          icon: gmaps.BitmapDescriptor.defaultMarkerWithHue(
+            gmaps.BitmapDescriptor.hueAzure,
+          ),
+          infoWindow: gmaps.InfoWindow(
+            title: p.name,
+            snippet: _distanceLabel(p.latitude, p.longitude),
+          ),
+        ),
+      );
+    }
+
+    for (final z in _nearbyDangerZones) {
+      markers.add(
+        gmaps.Marker(
+          markerId: gmaps.MarkerId('danger_${z.name}'),
+          position: gmaps.LatLng(z.latitude, z.longitude),
+          icon: gmaps.BitmapDescriptor.defaultMarkerWithHue(
+            gmaps.BitmapDescriptor.hueRed,
+          ),
+          infoWindow: gmaps.InfoWindow(
+            title: z.name,
+            snippet:
+                '${_distanceLabel(z.latitude, z.longitude)} · r=${z.radius.toStringAsFixed(0)}m',
+          ),
+        ),
+      );
+    }
+
+    setState(() {
+      _mapMarkers = markers;
+      _mapCircles = circles;
+    });
+
+    // Animate camera to user location once map is ready
+    if (_mapReady && _currentPos != null) {
+      _mapController?.animateCamera(
+        gmaps.CameraUpdate.newLatLngZoom(
+          gmaps.LatLng(_currentPos!.latitude, _currentPos!.longitude),
+          12.0,
+        ),
+      );
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BUILD
+  // ═══════════════════════════════════════════════════════════════════════════
   @override
   Widget build(BuildContext context) {
+    final hour = DateTime.now().hour;
+    final greeting = hour < 12
+        ? 'Good morning'
+        : hour < 17
+        ? 'Good afternoon'
+        : 'Good evening';
+    final firstName = profile?.name?.split(' ').first ?? '';
+
     return Scaffold(
-      appBar: AppBar(
-        title: const Text(
-          'SafeGuard',
-          style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold),
-        ),
-        backgroundColor: Colors.white,
-        elevation: 0,
-        actions: [
-          Stack(
-            children: [
+      backgroundColor: _lilac,
+      body: CustomScrollView(
+        slivers: [
+          // ── Hero App Bar ──────────────────────────────────────────────────
+          SliverAppBar(
+            expandedHeight: 220,
+            floating: false,
+            pinned: true,
+            backgroundColor: const Color(
+              0xFF3A9ABF,
+            ), // pinned bar colour matches teal
+            flexibleSpace: FlexibleSpaceBar(
+              background: FadeTransition(
+                opacity: _heroAnim,
+                child: Container(
+                  decoration: const BoxDecoration(
+                    // Light-teal gradient that matches the app's colour identity
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        Color(0xFF2E86AB), // deep sky blue
+                        Color(0xFF4FABCB), // teal (brand primary)
+                        Color(0xFF80CFEA), // light airy teal
+                      ],
+                    ),
+                  ),
+                  child: Stack(
+                    children: [
+                      // decorative circles — lighter so they pop on the bright bg
+                      Positioned(
+                        top: -30,
+                        right: -30,
+                        child: _decorCircle(
+                          160,
+                          Colors.white.withOpacity(0.08),
+                        ),
+                      ),
+                      Positioned(
+                        bottom: -20,
+                        left: -20,
+                        child: _decorCircle(
+                          120,
+                          Colors.white.withOpacity(0.06),
+                        ),
+                      ),
+                      Positioned(
+                        top: 20,
+                        right: 60,
+                        child: _decorCircle(60, Colors.white.withOpacity(0.12)),
+                      ),
+
+                      // content
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 56, 20, 20),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            // ── App name ────────────────────────────────────
+                            Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 4,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withOpacity(0.22),
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(
+                                      color: Colors.white.withOpacity(0.5),
+                                    ),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: const [
+                                      Icon(
+                                        Icons.shield_rounded,
+                                        color: Colors.white,
+                                        size: 14,
+                                      ),
+                                      SizedBox(width: 5),
+                                      Text(
+                                        'Lindana',
+                                        style: TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.w800,
+                                          letterSpacing: 1.2,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 10),
+
+                            // ── Greeting ─────────────────────────────────────
+                            Text(
+                              greeting,
+                              style: TextStyle(
+                                color: Colors.white.withOpacity(0.6),
+                                fontSize: 13,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              isLoading
+                                  ? 'Welcome back 👋'
+                                  : 'Hey, $firstName 👋',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 26,
+                                fontWeight: FontWeight.w800,
+                                height: 1.1,
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+
+                            // ── Safety status pill ───────────────────────────
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 6,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.12),
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(
+                                  color: Colors.white.withOpacity(0.2),
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Container(
+                                    width: 8,
+                                    height: 8,
+                                    decoration: const BoxDecoration(
+                                      color: _green,
+                                      shape: BoxShape.circle,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    '${_nearbyPolice.length} police nearby · ${_nearbyDangerZones.length} danger zones',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            actions: [
               IconButton(
                 icon: const Icon(
                   Icons.notifications_outlined,
-                  color: Colors.black87,
+                  color: Colors.white,
                 ),
                 onPressed: () {},
               ),
-              Positioned(
-                right: 8,
-                top: 8,
-                child: Container(
-                  padding: const EdgeInsets.all(2),
-                  decoration: const BoxDecoration(
-                    color: Colors.red,
-                    shape: BoxShape.circle,
-                  ),
-                  constraints: const BoxConstraints(minWidth: 8, minHeight: 8),
-                ),
-              ),
+              const SizedBox(width: 4),
             ],
           ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Quick Actions Section
-            _buildSectionHeader('Quick Actions'),
-            const SizedBox(height: 16),
-            _buildQuickActionsGrid(context),
 
-            const SizedBox(height: 30),
+          // ── Body ──────────────────────────────────────────────────────────
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(20, 24, 20, 32),
+            sliver: SliverList(
+              delegate: SliverChildListDelegate([
+                // ── Quick Actions ────────────────────────────────────────────
+                _label('Quick Actions'),
+                const SizedBox(height: 14),
+                _quickActions(),
 
-            // Safety Tips Section
-            _buildSectionHeader('Safety Tips'),
-            const SizedBox(height: 16),
-            _buildSafetyTipsCard(),
+                const SizedBox(height: 32),
 
-            const SizedBox(height: 30),
+                // ── PANIC banner ─────────────────────────────────────────────
+                _panicBanner(),
 
-            // Educational Content Section
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                _buildSectionHeader('Educational Content'),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 4,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.orange,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Text(
-                    'TRENDING',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                    ),
+                const SizedBox(height: 32),
+
+                // ── Nearby Map ───────────────────────────────────────────────
+                _rowHeader(
+                  'Nearby Safety Map',
+                  Icons.map_rounded,
+                  _teal,
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const MapPage()),
                   ),
                 ),
-              ],
+                const SizedBox(height: 8),
+                _mapLegend(),
+                const SizedBox(height: 10),
+                _nearbyMap(),
+
+                const SizedBox(height: 32),
+
+                // ── Nearby Police cards ──────────────────────────────────────
+                _rowHeader(
+                  'Nearby Police',
+                  Icons.local_police_rounded,
+                  _teal,
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const MapPage()),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                _policeSection(),
+
+                const SizedBox(height: 32),
+
+                // ── Danger Zones cards ───────────────────────────────────────
+                _rowHeader(
+                  'Danger Zones Near You',
+                  Icons.warning_amber_rounded,
+                  _red,
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const MapPage()),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                _dangerSection(),
+
+                const SizedBox(height: 32),
+
+                // ── Safety Tips ──────────────────────────────────────────────
+                _rowHeader(
+                  'Safety Tips',
+                  Icons.shield_outlined,
+                  _purple,
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const SafetyTipsPage()),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                _safetyTipsSection(),
+
+                const SizedBox(height: 32),
+
+                // ── Videos ───────────────────────────────────────────────────
+                _rowHeader(
+                  'Educational Videos',
+                  Icons.play_circle_outline_rounded,
+                  _orange,
+                  badge: 'TRENDING',
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const videosClass()),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                _videosSection(),
+              ]),
             ),
-            const SizedBox(height: 16),
-            _buildEducationalContent(),
-          ],
-        ),
+          ),
+        ],
       ),
       bottomNavigationBar: const CustomBottomNavigationBar(currentIndex: 0),
     );
   }
 
-  Widget _buildSectionHeader(String title) {
-    return Text(
-      title,
-      style: const TextStyle(
-        fontSize: 20,
-        fontWeight: FontWeight.bold,
-        color: Colors.black87,
+  // ═══════════════════════════════════════════════════════════════════════════
+  // NEARBY SAFETY MAP — embedded Google Map with Haversine-filtered markers
+  // ═══════════════════════════════════════════════════════════════════════════
+  Widget _mapLegend() => Row(
+    children: [
+      _legendDot(gmaps.BitmapDescriptor.hueAzure, 'Police stations', _teal),
+      const SizedBox(width: 16),
+      _legendDot(gmaps.BitmapDescriptor.hueRed, 'Danger zones', _red),
+      const Spacer(),
+      Text(
+        'within 5 km',
+        style: TextStyle(fontSize: 11, color: Colors.grey[500]),
       ),
-    );
-  }
+    ],
+  );
 
-  Widget _buildQuickActionsGrid(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.grey[50],
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.grey[200]!),
+  Widget _legendDot(double hue, String label, Color color) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Container(
+        width: 10,
+        height: 10,
+        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
       ),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: _buildQuickActionItem(
-                  Icons.upload_outlined,
-                  'Upload Safety Tip',
-                  Colors.blue,
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) =>
-                            const SafetyTipsPage(showUploadDialog: true),
-                      ),
-                    );
-                  },
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: _buildQuickActionItem(
-                  Icons.gavel_outlined,
-                  'Legal Aid',
-                  Colors.blue,
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => const UserLegalaid(),
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              Expanded(
-                child: _buildQuickActionItem(
-                  Icons.location_on_outlined,
-                  'Share Location',
-                  Colors.blue,
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(builder: (context) => const MapPage()),
-                    );
-                  },
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: _buildQuickActionItem(
-                  Icons.warning_amber_outlined,
-                  'Panic button',
-                  Colors.red,
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => const MapPage(triggerPanic: true),
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
+      const SizedBox(width: 5),
+      Text(label, style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+    ],
+  );
 
-  Widget _buildQuickActionItem(
-    IconData icon,
-    String label,
-    Color color, {
-    VoidCallback? onTap,
-  }) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 20),
+  Widget _nearbyMap() {
+    final userLat = _currentPos?.latitude ?? -1.286389;
+    final userLng = _currentPos?.longitude ?? 36.817223;
+
+    // Show a placeholder while police/danger data is still loading
+    if (policeLoading || dangerLoading) {
+      return Container(
+        height: 260,
         decoration: BoxDecoration(
-          color: Colors.white,
-          border: Border.all(color: Colors.grey[200]!),
-          borderRadius: BorderRadius.circular(12),
+          color: Colors.grey[200],
+          borderRadius: BorderRadius.circular(20),
         ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+        child: const Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(20),
+      child: SizedBox(
+        height: 260,
+        child: Stack(
           children: [
-            Container(
-              width: 60,
-              height: 60,
-              decoration: BoxDecoration(
-                color: color.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(12),
+            // ── Google Map ──────────────────────────────────────────────
+            gmaps.GoogleMap(
+              onMapCreated: (controller) {
+                _mapController = controller;
+                setState(() => _mapReady = true);
+                // Zoom to user once map is ready
+                if (_currentPos != null) {
+                  controller.animateCamera(
+                    gmaps.CameraUpdate.newLatLngZoom(
+                      gmaps.LatLng(
+                        _currentPos!.latitude,
+                        _currentPos!.longitude,
+                      ),
+                      13.5,
+                    ),
+                  );
+                }
+                _rebuildMapMarkers();
+              },
+              initialCameraPosition: gmaps.CameraPosition(
+                target: gmaps.LatLng(userLat, userLng),
+                zoom: 13.5,
               ),
-              child: Icon(icon, color: color, size: 28),
+              markers: _mapMarkers,
+              circles: _mapCircles, // ← 5km perimeter circle
+              myLocationEnabled: false,
+              myLocationButtonEnabled: false, // we provide our own button
+              zoomControlsEnabled: false,
+              mapToolbarEnabled: false,
+              compassEnabled: false,
             ),
-            const SizedBox(height: 8),
-            Text(
-              label,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-                color: Colors.black87,
+
+            // ── "Open full map" overlay button → navigates to MapPage ──
+            Positioned(
+              top: 10,
+              right: 10,
+              child: GestureDetector(
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const MapPage()),
+                ),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 7,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(10),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.12),
+                        blurRadius: 6,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: const [
+                      Icon(
+                        Icons.open_in_full,
+                        size: 13,
+                        color: Color(0xFF1A202C),
+                      ),
+                      SizedBox(width: 4),
+                      Text(
+                        'Full map',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF1A202C),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
+            // ── Re-centre button ─────────────────────────────────────────
+            Positioned(
+              bottom: 10,
+              right: 10,
+              child: GestureDetector(
+                onTap: () {
+                  if (_currentPos != null) {
+                    _mapController?.animateCamera(
+                      gmaps.CameraUpdate.newLatLngZoom(
+                        gmaps.LatLng(
+                          _currentPos!.latitude,
+                          _currentPos!.longitude,
+                        ),
+                        13.5,
+                      ),
+                    );
+                  }
+                },
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: _teal,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: _teal.withOpacity(0.4),
+                        blurRadius: 8,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: const Icon(
+                    Icons.my_location,
+                    color: Colors.white,
+                    size: 18,
+                  ),
+                ),
+              ),
+            ),
+
+            // ── Marker count badge ───────────────────────────────────────
+            Positioned(
+              bottom: 10,
+              left: 10,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(10),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.1),
+                      blurRadius: 6,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.local_police_rounded, size: 12, color: _teal),
+                    const SizedBox(width: 4),
+                    Text(
+                      '${_nearbyPolice.length}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: _teal,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Icon(Icons.warning_amber_rounded, size: 12, color: _red),
+                    const SizedBox(width: 4),
+                    Text(
+                      '${_nearbyDangerZones.length}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: _red,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ],
@@ -549,261 +1045,806 @@ class _UserHomepageState extends State<UserHomepage> {
     );
   }
 
-  Widget _buildSafetyTipsCard() {
-    if (tipsLoading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
-    if (safetyTips.isEmpty) {
-      return const Text("No safety tips available.");
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        ...safetyTips
-            .take(2)
-            .map((tip) => _buildExpandableTipCard(tip))
-            .toList(),
-        const SizedBox(height: 8),
-        Center(
-          child: ElevatedButton(
-            onPressed: () async {
-              final refreshed = await Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const SafetyTipsPage()),
-              );
-
-              if (refreshed == true) {
-                final userId = profile?.id?.toString();
-                if (userId != null) {
-                  await _fetchPurchasedContentIds(userId);
-                  setState(() {});
-                }
-              }
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF4FABCB),
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-            ),
-            child: const Text(
-              "See All",
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-                color: Colors.white,
-              ),
-            ),
+  // ═══════════════════════════════════════════════════════════════════════════
+  // QUICK ACTIONS — single row of 4 compact chips
+  // ═══════════════════════════════════════════════════════════════════════════
+  Widget _quickActions() {
+    final actions = [
+      _QuickAction(
+        icon: Icons.upload_outlined,
+        label: 'Upload Tip',
+        color: _teal,
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => const SafetyTipsPage(showUploadDialog: true),
           ),
         ),
-      ],
+      ),
+      _QuickAction(
+        icon: Icons.gavel_outlined,
+        label: 'Legal Aid',
+        color: _purple,
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const UserLegalaid()),
+        ),
+      ),
+      _QuickAction(
+        icon: Icons.location_on_outlined,
+        label: 'Share',
+        color: _green,
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const MapPage()),
+        ),
+      ),
+      _QuickAction(
+        icon: Icons.map_outlined,
+        label: 'Map',
+        color: _orange,
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const MapPage()),
+        ),
+      ),
+    ];
+
+    return Row(
+      children: actions
+          .map(
+            (a) => Expanded(
+              child: Padding(
+                padding: EdgeInsets.only(right: a == actions.last ? 0 : 10),
+                child: _compactActionChip(a),
+              ),
+            ),
+          )
+          .toList(),
     );
   }
 
-  Widget _buildExpandableTipCard(SafetyTip tip) {
-    return Card(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      elevation: 2,
-      margin: const EdgeInsets.only(bottom: 12),
-      child: ExpansionTile(
-        title: Text(
-          tip.title,
-          style: const TextStyle(fontWeight: FontWeight.w600),
-        ),
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8),
-            child: Text(tip.content),
+  Widget _compactActionChip(_QuickAction a) => GestureDetector(
+    onTap: a.onTap,
+    child: Container(
+      height: 76,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: a.color.withOpacity(0.18)),
+        boxShadow: [
+          BoxShadow(
+            color: a.color.withOpacity(0.10),
+            blurRadius: 8,
+            offset: const Offset(0, 3),
           ),
         ],
       ),
-    );
-  }
-
-  Widget _buildSafetyTip(String tip) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          margin: const EdgeInsets.only(top: 6),
-          width: 6,
-          height: 6,
-          decoration: const BoxDecoration(
-            color: Colors.blue,
-            shape: BoxShape.circle,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: a.color.withOpacity(0.12),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(a.icon, color: a.color, size: 17),
           ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Text(
-            tip,
-            style: const TextStyle(
-              fontSize: 14,
-              color: Colors.black87,
-              height: 1.4,
+          const SizedBox(height: 5),
+          Text(
+            a.label,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              color: _dark,
+              height: 1.2,
             ),
           ),
+        ],
+      ),
+    ),
+  );
+
+  Widget _actionCard({
+    required IconData icon,
+    required String label,
+    required List<Color> gradient,
+    required VoidCallback onTap,
+  }) => GestureDetector(
+    onTap: onTap,
+    child: Container(
+      height: 110,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: gradient,
         ),
-      ],
-    );
-  }
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: gradient.first.withOpacity(0.35),
+            blurRadius: 14,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Stack(
+        children: [
+          Positioned(
+            right: -10,
+            bottom: -10,
+            child: _decorCircle(70, Colors.white.withOpacity(0.08)),
+          ),
+          Positioned(
+            right: 10,
+            top: 10,
+            child: _decorCircle(30, Colors.white.withOpacity(0.1)),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(icon, color: Colors.white, size: 22),
+                ),
+                Text(
+                  label,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    height: 1.3,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
 
-  Widget _buildEducationalContent() {
-    if (eduLoading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
-    if (educationalItems.isEmpty) {
-      return const Text("No educational content available.");
-    }
-
-    return Column(
-      children: [
-        ...educationalItems.take(2).map(_buildEducationalItem).toList(),
-        const SizedBox(height: 8),
-        Center(
-          child: ElevatedButton(
-            onPressed: () async {
-              final refreshed = await Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const SafetyTipsPage()),
-              );
-
-              if (refreshed == true) {
-                final userId = profile?.id?.toString();
-                if (userId != null) {
-                  await _fetchPurchasedContentIds(userId);
-                  setState(() {});
-                }
-              }
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF4FABCB),
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PANIC BANNER — full width, dramatic
+  // ═══════════════════════════════════════════════════════════════════════════
+  Widget _panicBanner() => GestureDetector(
+    onTap: () => Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const MapPage(triggerPanic: true)),
+    ),
+    child: Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFFE53E3E), Color(0xFFC0392B)],
+        ),
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: _red.withOpacity(0.45),
+            blurRadius: 18,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.15),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.warning_rounded,
+              color: Colors.white,
+              size: 28,
+            ),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Emergency Panic',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Tap to immediately alert your emergency contacts',
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.8),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
             ),
             child: const Text(
-              "See All",
+              'SOS',
               style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-                color: Colors.white,
+                color: _red,
+                fontSize: 14,
+                fontWeight: FontWeight.w800,
               ),
             ),
           ),
-        ),
-      ],
-    );
-  }
+        ],
+      ),
+    ),
+  );
 
-  void _showBottomSheetContent(String content) {
-    showModalBottomSheet(
-      context: context,
-      builder: (context) {
-        return Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: SingleChildScrollView(child: Text(content)),
-        );
-      },
-    );
-  }
-
-  Widget _buildEducationalItem(EducationalContent item) {
-    final unlockedIds = purchasedContentIds.map((e) => e.toString()).toList();
-    final isUnlocked = unlockedIds.contains(item.id.toString());
-
-    return InkWell(
-      onTap: () async {
-        if (isUnlocked) {
-          _showBottomSheetContent(item.content);
-        } else {
-          final shouldPay = await showDialog<bool>(
-            context: context,
-            builder: (_) => AlertDialog(
-              title: const Text("Unlock Content"),
-              content: const Text(
-                "This is premium content. Do you want to purchase access?",
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context, false),
-                  child: const Text("Cancel"),
+  // ═══════════════════════════════════════════════════════════════════════════
+  // POLICE STATIONS — horizontal scroll cards (now Haversine-filtered)
+  // ═══════════════════════════════════════════════════════════════════════════
+  Widget _policeSection() {
+    if (policeLoading) return _shimmerRow();
+    final nearby = _nearbyPolice;
+    if (nearby.isEmpty)
+      return _emptyState(
+        'No police stations within 5 km',
+        Icons.local_police_outlined,
+      );
+    return SizedBox(
+      height: 140,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: nearby.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 12),
+        itemBuilder: (_, i) {
+          final p = nearby[i];
+          final dist = _distanceLabel(p.latitude, p.longitude);
+          return Container(
+            width: 200,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: _teal.withOpacity(0.2)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.grey.withOpacity(0.07),
+                  blurRadius: 8,
+                  offset: const Offset(0, 3),
                 ),
-                TextButton(
-                  onPressed: () => Navigator.pop(context, true),
-                  child: const Text("Buy"),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: _teal.withOpacity(0.12),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Icon(
+                        Icons.local_police_rounded,
+                        color: _teal,
+                        size: 16,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    if (dist.isNotEmpty)
+                      Expanded(
+                        child: Text(
+                          dist,
+                          style: const TextStyle(
+                            color: _teal,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        p.name,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: _dark,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        _distanceLabel(p.latitude, p.longitude),
+                        style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ),
           );
+        },
+      ),
+    );
+  }
 
-          if (shouldPay == true) {
-            _startPaymentFlow(item);
-          }
-        }
-      },
+  // ═══════════════════════════════════════════════════════════════════════════
+  // DANGER ZONES — horizontal scroll cards (now Haversine-filtered)
+  // ═══════════════════════════════════════════════════════════════════════════
+  Widget _dangerSection() {
+    if (dangerLoading) return _shimmerRow();
+    final nearby = _nearbyDangerZones;
+    if (nearby.isEmpty)
+      return _emptyState('No danger zones within 5 km', Icons.shield_outlined);
+    return SizedBox(
+      height: 120,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: nearby.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 12),
+        itemBuilder: (_, i) {
+          final z = nearby[i];
+          final dist = _distanceLabel(z.latitude, z.longitude);
+          return Container(
+            width: 200,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: _red.withOpacity(0.2)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.grey.withOpacity(0.07),
+                  blurRadius: 8,
+                  offset: const Offset(0, 3),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: _red.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Icon(
+                        Icons.warning_amber_rounded,
+                        color: _red,
+                        size: 16,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    if (dist.isNotEmpty)
+                      Expanded(
+                        child: Text(
+                          dist,
+                          style: const TextStyle(
+                            color: _red,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                const Spacer(),
+                Text(
+                  z.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: _dark,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Radius: ${z.radius.toStringAsFixed(0)}m',
+                  style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SAFETY TIPS
+  // ═══════════════════════════════════════════════════════════════════════════
+  Widget _safetyTipsSection() {
+    if (tipsLoading) return _shimmerList(2);
+    if (safetyTips.isEmpty)
+      return _emptyState('No safety tips yet', Icons.shield_outlined);
+    final colours = [_teal, _purple, _green, _orange];
+    return Column(
+      children: safetyTips.take(2).toList().asMap().entries.map((e) {
+        final col = colours[e.key % colours.length];
+        return _tipCard(e.value, col);
+      }).toList(),
+    );
+  }
+
+  Widget _tipCard(SafetyTip tip, Color accent) => Container(
+    margin: const EdgeInsets.only(bottom: 12),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(16),
+      border: Border.all(color: Colors.grey[200]!),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.grey.withOpacity(0.06),
+          blurRadius: 8,
+          offset: const Offset(0, 3),
+        ),
+      ],
+    ),
+    child: Theme(
+      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        tilePadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        leading: Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: accent.withOpacity(0.12),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Icon(Icons.shield_outlined, color: accent, size: 20),
+        ),
+        title: Text(
+          tip.title,
+          style: const TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+            color: _dark,
+          ),
+        ),
+        iconColor: accent,
+        collapsedIconColor: Colors.grey[400],
+        children: [
+          Text(
+            tip.content,
+            style: TextStyle(
+              fontSize: 13,
+              color: Colors.grey[600],
+              height: 1.5,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // VIDEOS
+  // ═══════════════════════════════════════════════════════════════════════════
+  Widget _videosSection() {
+    if (videoLoading) return _shimmerList(2, height: 90);
+    if (videoInfoList.isEmpty)
+      return _emptyState('No videos available', Icons.video_library_outlined);
+    return Column(
+      children: [
+        ...videoInfoList.take(2).map(_videoCard),
+        const SizedBox(height: 4),
+        GestureDetector(
+          onTap: () async {
+            final r = await Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const videosClass()),
+            );
+            if (r == true) _loadVideoInfo();
+          },
+          child: Container(
+            width: double.infinity,
+            height: 50,
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFFED8936), Color(0xFFFBBF24)],
+              ),
+              borderRadius: BorderRadius.circular(14),
+              boxShadow: [
+                BoxShadow(
+                  color: _orange.withOpacity(0.3),
+                  blurRadius: 10,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: const Center(
+              child: Text(
+                'See All Videos',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 14,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _videoCard(VideoInfo v) {
+    final id = YoutubePlayer.convertUrlToId(v.url);
+    if (id == null) return const SizedBox.shrink();
+    return GestureDetector(
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => playerClass(videoID: id, title: v.title),
+        ),
+      ),
       child: Container(
-        margin: const EdgeInsets.only(bottom: 16),
+        margin: const EdgeInsets.only(bottom: 12),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.grey[200]!),
           boxShadow: [
             BoxShadow(
-              color: Colors.grey.withOpacity(0.1),
-              spreadRadius: 1,
-              blurRadius: 6,
+              color: Colors.grey.withOpacity(0.06),
+              blurRadius: 8,
               offset: const Offset(0, 3),
             ),
           ],
         ),
         child: Row(
           children: [
+            ClipRRect(
+              borderRadius: const BorderRadius.horizontal(
+                left: Radius.circular(16),
+              ),
+              child: Stack(
+                children: [
+                  Image.network(
+                    YoutubePlayer.getThumbnail(
+                      videoId: id,
+                      quality: ThumbnailQuality.medium,
+                    ),
+                    width: 110,
+                    height: 80,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => Container(
+                      width: 110,
+                      height: 80,
+                      color: Colors.grey[200],
+                      child: const Icon(
+                        Icons.video_library,
+                        color: Colors.grey,
+                      ),
+                    ),
+                  ),
+                  Positioned.fill(
+                    child: Container(
+                      color: Colors.black26,
+                      child: const Center(
+                        child: Icon(
+                          Icons.play_circle_fill,
+                          size: 30,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
             Expanded(
               child: Padding(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
+                ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      item.title,
+                      v.title ?? 'Video',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: _dark,
                       ),
                     ),
-                    const SizedBox(height: 4),
-                    if (item.isPaid && !isUnlocked)
-                      Text(
-                        "KES ${item.price.toStringAsFixed(2)}",
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: Colors.orange,
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.play_arrow_rounded,
+                          color: _orange,
+                          size: 14,
                         ),
-                      ),
-                    if (isUnlocked)
-                      Text(
-                        item.content,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey,
+                        const SizedBox(width: 4),
+                        Text(
+                          'Watch now',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.grey[500],
+                          ),
                         ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
+                      ],
+                    ),
                   ],
                 ),
               ),
             ),
-            if (item.isPaid)
-              Padding(
-                padding: const EdgeInsets.only(right: 16),
-                child: Icon(
-                  isUnlocked ? Icons.lock_open : Icons.lock_outline,
-                  color: isUnlocked ? Colors.green : Colors.grey,
-                ),
-              ),
           ],
         ),
       ),
     );
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SHARED HELPERS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  Widget _label(String t) => Text(
+    t,
+    style: const TextStyle(
+      fontSize: 17,
+      fontWeight: FontWeight.w700,
+      color: _dark,
+    ),
+  );
+
+  Widget _rowHeader(
+    String title,
+    IconData icon,
+    Color color, {
+    VoidCallback? onTap,
+    String? badge,
+  }) => Row(
+    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    children: [
+      Row(
+        children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: color.withOpacity(0.12),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(icon, color: color, size: 16),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            title,
+            style: const TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.w700,
+              color: _dark,
+            ),
+          ),
+          if (badge != null) ...[
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: _orange,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Text(
+                badge,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 9,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+      GestureDetector(
+        onTap: onTap,
+        child: Text(
+          'See all',
+          style: TextStyle(
+            color: color,
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+    ],
+  );
+
+  Widget _shimmerList(int n, {double height = 80}) => Column(
+    children: List.generate(
+      n,
+      (_) => Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        height: height,
+        decoration: BoxDecoration(
+          color: Colors.grey[200],
+          borderRadius: BorderRadius.circular(16),
+        ),
+      ),
+    ),
+  );
+
+  Widget _shimmerRow() => SizedBox(
+    height: 120,
+    child: ListView.separated(
+      scrollDirection: Axis.horizontal,
+      itemCount: 3,
+      separatorBuilder: (_, __) => const SizedBox(width: 12),
+      itemBuilder: (_, __) => Container(
+        width: 200,
+        decoration: BoxDecoration(
+          color: Colors.grey[200],
+          borderRadius: BorderRadius.circular(16),
+        ),
+      ),
+    ),
+  );
+
+  Widget _emptyState(String msg, IconData icon) => Center(
+    child: Padding(
+      padding: const EdgeInsets.symmetric(vertical: 20),
+      child: Column(
+        children: [
+          Icon(icon, size: 38, color: Colors.grey[300]),
+          const SizedBox(height: 8),
+          Text(msg, style: TextStyle(color: Colors.grey[400], fontSize: 13)),
+        ],
+      ),
+    ),
+  );
+
+  Widget _decorCircle(double size, Color color) => Container(
+    width: size,
+    height: size,
+    decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+  );
+
+  void _showBottomSheet(String content) => showModalBottomSheet(
+    context: context,
+    builder: (_) => Padding(
+      padding: const EdgeInsets.all(16),
+      child: SingleChildScrollView(child: Text(content)),
+    ),
+  );
 }

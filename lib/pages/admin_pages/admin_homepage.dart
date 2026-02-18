@@ -20,7 +20,7 @@ class _AdminHomepageState extends State<AdminHomepage> {
   Map<String, dynamic> analytics = {};
   Map<String, dynamic> providerStats = {};
   bool isLoading = true;
-  String baseUrl = 'https://b0b2bb2b9a75.ngrok-free.app';
+  String baseUrl = 'https://d2d35afcbdcd.ngrok-free.app';
 
   @override
   void initState() {

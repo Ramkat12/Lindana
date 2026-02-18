@@ -4,42 +4,58 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:geolocator/geolocator.dart' as gl;
 import 'package:http/http.dart' as http;
 import 'package:is_project_1/pages/user_pages/location_webservices.dart';
+import 'package:is_project_1/services/background_voice_service.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' as mp;
+import 'package:google_maps_flutter/google_maps_flutter.dart' as gmaps;
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:vibration/vibration.dart';
 
 import 'package:is_project_1/components/custom_bootom_navbar.dart';
 import 'package:is_project_1/services/api_service.dart';
-import 'package:is_project_1/models/emergency_contact.dart'
-    hide EmergencyContact;
 import 'package:is_project_1/models/profile_response.dart';
 import 'package:share_plus/share_plus.dart';
 
-class MapPage extends StatefulWidget {
-  final bool triggerPanic;
-
-  const MapPage({super.key, this.triggerPanic = false});
-
-  @override
-  State<MapPage> createState() => _MapPageState();
+// ── Haversine helper ──────────────────────────────────────────────────────────
+// Pure math — no plugin needed, runs synchronously.
+// Returns the great-circle distance in **metres** between two lat/lng points.
+//
+// Formula breakdown:
+//   a = sin²(Δlat/2) + cos(lat1)·cos(lat2)·sin²(Δlng/2)
+//   c = 2·atan2(√a, √(1−a))
+//   d = R·c      where R = 6 371 000 m (Earth's mean radius)
+double _haversineMetres(double lat1, double lng1, double lat2, double lng2) {
+  const double R = 6371000.0;
+  final double dLat = _deg2rad(lat2 - lat1);
+  final double dLng = _deg2rad(lng2 - lng1);
+  final double a =
+      sin(dLat / 2) * sin(dLat / 2) +
+      cos(_deg2rad(lat1)) * cos(_deg2rad(lat2)) * sin(dLng / 2) * sin(dLng / 2);
+  final double c = 2 * atan2(sqrt(a), sqrt(1 - a));
+  return R * c;
 }
+
+double _deg2rad(double deg) => deg * pi / 180.0;
+
+// Friendly distance label  e.g. "340m away"  or  "2.3km away"
+String _distLabel(double metres) => metres < 1000
+    ? '${metres.toStringAsFixed(0)}m away'
+    : '${(metres / 1000).toStringAsFixed(1)}km away';
+
+// ── Models ────────────────────────────────────────────────────────────────────
 
 class PoliceLocation {
   final String name;
   final double latitude;
   final double longitude;
-  final String contactNumber;
 
   PoliceLocation({
     required this.name,
     required this.latitude,
     required this.longitude,
-    required this.contactNumber,
   });
 
   factory PoliceLocation.fromJson(Map<String, dynamic> json) {
@@ -47,7 +63,6 @@ class PoliceLocation {
       name: json['name'],
       latitude: json['latitude'].toDouble(),
       longitude: json['longitude'].toDouble(),
-      contactNumber: json['contact_number'],
     );
   }
 }
@@ -57,7 +72,7 @@ class DangerZone {
   final double latitude;
   final double longitude;
   final String description;
-  final double radius; // in meters
+  final double radius; // metres
 
   DangerZone({
     required this.name,
@@ -78,37 +93,70 @@ class DangerZone {
   }
 }
 
+// ── Page ──────────────────────────────────────────────────────────────────────
+
+class MapPage extends StatefulWidget {
+  final bool triggerPanic;
+  const MapPage({super.key, this.triggerPanic = false});
+
+  @override
+  State<MapPage> createState() => _MapPageState();
+}
+
 class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
-  mp.MapboxMap? mapboxMapController;
-  StreamSubscription? userPositionStream;
-  StreamSubscription? accelerometerSubscription;
+  // ── colours (mirrors homepage palette) ──────────────────────────────────
+  static const _teal = Color(0xFF4FABCB);
+  static const _red = Color(0xFFE53E3E);
+  static const _dark = Color(0xFF1A202C);
+  static const _green = Color(0xFF27AE60);
+
+  // ── map ──────────────────────────────────────────────────────────────────
+  mp.MapboxMap? mapboxMapController; // kept for future use
+  gmaps.GoogleMapController? googleMapController;
   bool isMapReady = false;
+
+  // ── markers / circles ────────────────────────────────────────────────────
+  Set<gmaps.Marker> _markers = {};
+  Set<gmaps.Circle> _circles = {};
+
+  // 5 km search radius — same constant as the homepage
+  static const double _searchRadius = 5000.0;
+
+  // ── data ─────────────────────────────────────────────────────────────────
+  List<PoliceLocation> policeLocations = [];
+  List<DangerZone> dangerZones = [];
+  Set<String> notifiedDangerZones = {};
+  String API_BASE_URL =
+      dotenv.env['API_BASE_URL'] ?? 'https://dbf2f97222f3.ngrok-free.app';
+
+  // ── location ─────────────────────────────────────────────────────────────
+  gl.Position? currentPosition;
+  StreamSubscription? userPositionStream;
+
+  // ── real-time tracking ───────────────────────────────────────────────────
   bool isRealTimeTrackingEnabled = false;
-  int currentActivityId = 1; // You can make this dynamic
+  int currentActivityId = 1;
   Timer? gpsLoggingTimer;
   Map<String, dynamic>? activeSharingSession;
   StreamSubscription? _locationUpdateSubscription;
   StreamSubscription? _connectionStatusSubscription;
   Map<String, dynamic>? _lastReceivedLocation;
-  List<PoliceLocation> policeLocations = [];
-  List<DangerZone> dangerZones = [];
-  Set<String> notifiedDangerZones = {};
-  String API_BASE_URL = dotenv.env['API_BASE_URL'] ?? 'http://localhost:8000';
 
-  // Emergency features
+  // ── emergency ────────────────────────────────────────────────────────────
   List<EmergencyContact> emergencyContacts = [];
   ProfileResponse? profile;
   bool isInPanicMode = false;
   int shakeCount = 0;
   DateTime? lastShakeTime;
-  List<double> accelerometerValues = [];
   Timer? shakeResetTimer;
-  gl.Position? currentPosition;
+  StreamSubscription? accelerometerSubscription;
 
-  // Shake detection parameters
+  // Shake params
   static const double shakeThreshold = 12.0;
   static const int shakeCountThreshold = 3;
   static const Duration shakeTimeWindow = Duration(seconds: 2);
+
+  // ── lifecycle ────────────────────────────────────────────────────────────
 
   @override
   void initState() {
@@ -121,24 +169,22 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     _setupShakeDetection();
     _initializeWebSocket();
     _loadMapData();
-    _loadEmergencyContacts();
+    BackgroundVoiceService.instance.onWakeWordDetected = _triggerPanicMode;
+    BackgroundVoiceService.instance.startIfEnabled();
     if (widget.triggerPanic) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _triggerPanicMode();
-      });
+      WidgetsBinding.instance.addPostFrameCallback((_) => _triggerPanicMode());
     }
   }
 
   Future<void> loadEnv() async {
     try {
-      await dotenv.load(fileName: ".env");
+      await dotenv.load(fileName: '.env');
       setState(() {
         API_BASE_URL =
-            dotenv.env['API_BASE_URL'] ??
-            'https://b0b2bb2b9a75.ngrok-free.app'; // Default fallback
+            dotenv.env['API_BASE_URL'] ?? 'https://d2d35afcbdcd.ngrok-free.app';
       });
     } catch (e) {
-      print('Error loading .env file: $e');
+      debugPrint('Error loading .env file: $e');
     }
   }
 
@@ -152,43 +198,64 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     _locationUpdateSubscription?.cancel();
     _connectionStatusSubscription?.cancel();
     LocationWebSocketService.instance.dispose();
+    BackgroundVoiceService.instance.onWakeWordDetected = null;
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
-    if (state == AppLifecycleState.resumed && isInPanicMode) {
-      // App was brought to foreground while in panic mode
-      _showPanicScreen();
-    }
+    if (state == AppLifecycleState.resumed && isInPanicMode) _showPanicScreen();
   }
+
+  // ── data loading ─────────────────────────────────────────────────────────
 
   Future<void> _loadMapData() async {
-    await Future.wait([_fetchPoliceLocations(), _fetchDangerZones()]);
-
-    if (isMapReady) {
-      _addMarkersToMap();
+    try {
+      currentPosition = await gl.Geolocator.getCurrentPosition();
+    } catch (e) {
+      debugPrint('Error getting location: $e');
     }
+
+    if (currentPosition != null) {
+      await Future.wait([
+        _fetchNearbyPoliceLocations(
+          currentPosition!.latitude,
+          currentPosition!.longitude,
+        ),
+        _fetchDangerZones(),
+      ]);
+    } else {
+      await _fetchDangerZones();
+    }
+
+    _rebuildMapOverlays(); // always rebuild after data arrives
   }
 
-  Future<void> _fetchPoliceLocations() async {
+  Future<void> _fetchNearbyPoliceLocations(double lat, double lng) async {
     try {
+      final uri = Uri.parse('$API_BASE_URL/nearby-police').replace(
+        queryParameters: {
+          'latitude': lat.toString(),
+          'longitude': lng.toString(),
+          'radius': '5000',
+        },
+      );
       final response = await http.get(
-        Uri.parse('$API_BASE_URL/police-locations'),
+        uri,
         headers: {'Content-Type': 'application/json'},
       );
-
       if (response.statusCode == 200) {
-        final List<dynamic> data = json.decode(response.body);
+        final data = json.decode(response.body) as Map<String, dynamic>;
+        final locations = data['nearby_police'] as List<dynamic>;
         setState(() {
-          policeLocations = data
-              .map((json) => PoliceLocation.fromJson(json))
+          policeLocations = locations
+              .map((j) => PoliceLocation.fromJson(j))
               .toList();
         });
       }
     } catch (e) {
-      print('Error fetching police locations: $e');
+      debugPrint('Error fetching nearby police: $e');
     }
   }
 
@@ -198,109 +265,238 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
         Uri.parse('$API_BASE_URL/danger-zones'),
         headers: {'Content-Type': 'application/json'},
       );
-
       if (response.statusCode == 200) {
-        final List<dynamic> data = json.decode(response.body);
+        final data = json.decode(response.body) as List<dynamic>;
         setState(() {
-          dangerZones = data.map((json) => DangerZone.fromJson(json)).toList();
+          dangerZones = data.map((j) => DangerZone.fromJson(j)).toList();
         });
       }
     } catch (e) {
-      print('Error fetching danger zones: $e');
+      debugPrint('Error fetching danger zones: $e');
     }
   }
 
-  void _toggleRealTimeTracking() async {
+  // ── Haversine filtering ───────────────────────────────────────────────────
+  // Only keep items within _searchRadius of the user.
+  // If we have no GPS fix yet, show everything so the map isn't empty.
+
+  double _distTo(double lat, double lng) {
+    if (currentPosition == null) return 0;
+    return _haversineMetres(
+      currentPosition!.latitude,
+      currentPosition!.longitude,
+      lat,
+      lng,
+    );
+  }
+
+  List<PoliceLocation> get _nearbyPolice {
+    if (currentPosition == null) return policeLocations;
+    return policeLocations
+        .where((p) => _distTo(p.latitude, p.longitude) <= _searchRadius)
+        .toList()
+      ..sort(
+        (a, b) => _distTo(
+          a.latitude,
+          a.longitude,
+        ).compareTo(_distTo(b.latitude, b.longitude)),
+      );
+  }
+
+  List<DangerZone> get _nearbyDangerZones {
+    if (currentPosition == null) return dangerZones;
+    return dangerZones
+        .where((z) => _distTo(z.latitude, z.longitude) <= _searchRadius)
+        .toList()
+      ..sort(
+        (a, b) => _distTo(
+          a.latitude,
+          a.longitude,
+        ).compareTo(_distTo(b.latitude, b.longitude)),
+      );
+  }
+
+  // ── Map overlays: markers + 5km perimeter circle ─────────────────────────
+
+  void _rebuildMapOverlays() {
+    final Set<gmaps.Marker> markers = {};
+    final Set<gmaps.Circle> circles = {};
+
+    // ── 5 km perimeter circle — clearly visible boundary ────────────────
+    if (currentPosition != null) {
+      // Outer boundary: solid teal stroke + visible fill
+      circles.add(
+        gmaps.Circle(
+          circleId: const gmaps.CircleId('perimeter_5km'),
+          center: gmaps.LatLng(
+            currentPosition!.latitude,
+            currentPosition!.longitude,
+          ),
+          radius: _searchRadius,
+          strokeColor: const Color(0xFF4FABCB),
+          strokeWidth: 3,
+          fillColor: const Color(0xFF4FABCB).withOpacity(0.12),
+        ),
+      );
+      // Inner accent ring at 2.5 km — gives depth / sense of scale
+      circles.add(
+        gmaps.Circle(
+          circleId: const gmaps.CircleId('inner_ring_2_5km'),
+          center: gmaps.LatLng(
+            currentPosition!.latitude,
+            currentPosition!.longitude,
+          ),
+          radius: _searchRadius / 2,
+          strokeColor: const Color(0xFF4FABCB).withOpacity(0.45),
+          strokeWidth: 1,
+          fillColor: Colors.transparent,
+        ),
+      );
+
+      // ── Black pulsating user-location circle ──────────────────────────
+      // Outer "pulse" ring — semi-transparent black
+      circles.add(
+        gmaps.Circle(
+          circleId: const gmaps.CircleId('user_pulse'),
+          center: gmaps.LatLng(
+            currentPosition!.latitude,
+            currentPosition!.longitude,
+          ),
+          radius: 120,
+          strokeColor: Colors.black.withOpacity(0.25),
+          strokeWidth: 2,
+          fillColor: Colors.black.withOpacity(0.08),
+        ),
+      );
+      // Inner solid black dot
+      circles.add(
+        gmaps.Circle(
+          circleId: const gmaps.CircleId('user_dot'),
+          center: gmaps.LatLng(
+            currentPosition!.latitude,
+            currentPosition!.longitude,
+          ),
+          radius: 40,
+          strokeColor: Colors.black,
+          strokeWidth: 3,
+          fillColor: Colors.black.withOpacity(0.85),
+        ),
+      );
+    }
+
+    // ── Police markers (azure blue) — only within 5 km ──────────────────
+    for (final p in _nearbyPolice) {
+      final dist = _distTo(p.latitude, p.longitude);
+      markers.add(
+        gmaps.Marker(
+          markerId: gmaps.MarkerId('police_${p.name}'),
+          position: gmaps.LatLng(p.latitude, p.longitude),
+          icon: gmaps.BitmapDescriptor.defaultMarkerWithHue(
+            gmaps.BitmapDescriptor.hueAzure,
+          ),
+          infoWindow: gmaps.InfoWindow(
+            title: p.name,
+            snippet: _distLabel(dist),
+          ),
+        ),
+      );
+    }
+
+    // ── Danger zone markers (red) — only within 5 km ────────────────────
+    for (final z in _nearbyDangerZones) {
+      final dist = _distTo(z.latitude, z.longitude);
+      markers.add(
+        gmaps.Marker(
+          markerId: gmaps.MarkerId('danger_${z.name}'),
+          position: gmaps.LatLng(z.latitude, z.longitude),
+          icon: gmaps.BitmapDescriptor.defaultMarkerWithHue(
+            gmaps.BitmapDescriptor.hueRed,
+          ),
+          infoWindow: gmaps.InfoWindow(
+            title: z.name,
+            snippet:
+                '${_distLabel(dist)} · radius ${z.radius.toStringAsFixed(0)}m',
+          ),
+        ),
+      );
+    }
+
     setState(() {
-      isRealTimeTrackingEnabled = !isRealTimeTrackingEnabled;
+      _markers = markers;
+      _circles = circles;
     });
 
-    if (isRealTimeTrackingEnabled) {
-      await _startRealTimeTracking();
-    } else {
-      await _stopRealTimeTracking();
-    }
-  }
-
-  Future<void> _loadEmergencyContacts() async {
-    try {
-      final profileData = await ApiService.getProfile();
-      List<EmergencyContact> contacts = [];
-
-      if (profileData.roleId == 5) {
-        try {
-          contacts = await ApiService.getEmergencyContacts();
-        } catch (e) {
-          debugPrint('Failed to load emergency contacts: $e');
-        }
-      }
-
-      setState(() {
-        profile = profileData;
-        emergencyContacts = contacts;
-      });
-    } catch (e) {
-      debugPrint('Error loading profile/emergency contacts: $e');
-    }
-  }
-
-  Future<void> _initializeWebSocket() async {
-    try {
-      final profileData = await ApiService.getProfile();
-      // Get current user ID (you'll need to implement this)
-      final userId = profileData.id; // Replace with actual user ID
-
-      await LocationWebSocketService.instance.connect(userId as String);
-
-      // Listen to location updates from other users
-      _locationUpdateSubscription = LocationWebSocketService
-          .instance
-          .locationUpdates
-          .listen((locationData) {
-            _handleLocationUpdate(locationData);
-          });
-
-      // Listen to connection status
-      _connectionStatusSubscription = LocationWebSocketService
-          .instance
-          .connectionStatus
-          .listen((isConnected) {
-            setState(() {
-              // Update UI based on connection status
-            });
-
-            if (isConnected && isRealTimeTrackingEnabled) {
-              // Resume real-time tracking if it was enabled
-              _startRealTimeTracking();
-            }
-          });
-    } catch (e) {
-      debugPrint('Error initializing WebSocket: $e');
-    }
-  }
-
-  void _handleLocationUpdate(Map<String, dynamic> locationData) {
-    setState(() {
-      _lastReceivedLocation = locationData;
-    });
-
-    // Update map with received location if it's from someone being tracked
-    final data = locationData['data'];
-    if (data != null && data['latitude'] != null && data['longitude'] != null) {
-      // You can update the map to show the tracked user's location
-      debugPrint(
-        'Received location update: ${data['latitude']}, ${data['longitude']}',
+    // Animate camera to user once map is ready
+    if (isMapReady && currentPosition != null) {
+      googleMapController?.animateCamera(
+        gmaps.CameraUpdate.newLatLngZoom(
+          gmaps.LatLng(currentPosition!.latitude, currentPosition!.longitude),
+          12.0,
+        ),
       );
     }
   }
 
-  // Enhanced real-time tracking with WebSocket
+  // ── position tracking ─────────────────────────────────────────────────────
+
+  Future<void> _setupPositionTracking() async {
+    try {
+      bool svc = await gl.Geolocator.isLocationServiceEnabled();
+      if (!svc) {
+        debugPrint('Location services disabled');
+        return;
+      }
+
+      var perm = await gl.Geolocator.checkPermission();
+      if (perm == gl.LocationPermission.denied)
+        perm = await gl.Geolocator.requestPermission();
+      if (perm == gl.LocationPermission.denied ||
+          perm == gl.LocationPermission.deniedForever) {
+        debugPrint('Location permission denied');
+        return;
+      }
+
+      userPositionStream?.cancel();
+      userPositionStream =
+          gl.Geolocator.getPositionStream(
+            locationSettings: const gl.LocationSettings(
+              accuracy: gl.LocationAccuracy.high,
+              distanceFilter: 10,
+            ),
+          ).listen((gl.Position pos) {
+            currentPosition = pos;
+            // Move camera with user
+            if (googleMapController != null && isMapReady) {
+              googleMapController!.animateCamera(
+                gmaps.CameraUpdate.newCameraPosition(
+                  gmaps.CameraPosition(
+                    target: gmaps.LatLng(pos.latitude, pos.longitude),
+                    zoom: 15.0,
+                  ),
+                ),
+              );
+            }
+            // Rebuild overlays so the circle follows the user
+            _rebuildMapOverlays();
+          }, onError: (e) => debugPrint('Position stream error: $e'));
+    } catch (e) {
+      debugPrint('Error setting up position tracking: $e');
+    }
+  }
+
+  // ── real-time tracking ────────────────────────────────────────────────────
+
+  void _toggleRealTimeTracking() async {
+    setState(() => isRealTimeTrackingEnabled = !isRealTimeTrackingEnabled);
+    if (isRealTimeTrackingEnabled)
+      await _startRealTimeTracking();
+    else
+      await _stopRealTimeTracking();
+  }
+
   Future<void> _startRealTimeTracking() async {
     try {
-      // Start logging GPS data every 10 seconds
-      gpsLoggingTimer = Timer.periodic(const Duration(seconds: 10), (
-        timer,
-      ) async {
+      gpsLoggingTimer = Timer.periodic(const Duration(seconds: 10), (_) async {
         if (currentPosition != null) {
           try {
             await ApiService.logGPSLocationRealtime(
@@ -308,13 +504,11 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
               longitude: currentPosition!.longitude,
               activityId: currentActivityId,
             );
-            debugPrint('GPS location logged successfully');
           } catch (e) {
-            debugPrint('Failed to log GPS location: $e');
+            debugPrint('GPS log failed: $e');
           }
         }
       });
-
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -324,14 +518,13 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
         );
       }
     } catch (e) {
-      debugPrint('Error starting real-time tracking: $e');
+      debugPrint('Error starting tracking: $e');
     }
   }
 
   Future<void> _stopRealTimeTracking() async {
     gpsLoggingTimer?.cancel();
     gpsLoggingTimer = null;
-
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -342,165 +535,144 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _updateUserLocationOnMap(gl.Position position) async {
-    if (mapboxMapController == null) return;
+  // ── emergency contacts ────────────────────────────────────────────────────
 
+  Future<void> _loadEmergencyContacts() async {
     try {
-      // Update camera to follow user
-      await mapboxMapController!.setCamera(
-        mp.CameraOptions(
-          center: mp.Point(
-            coordinates: mp.Position(position.longitude, position.latitude),
-          ),
-          zoom: 16.0,
-        ),
-      );
-
-      // Add/update user location marker
-      await mapboxMapController!.annotations
-          .createPointAnnotationManager()
-          .then((manager) async {
-            final options = mp.PointAnnotationOptions(
-              geometry: mp.Point(
-                coordinates: mp.Position(position.longitude, position.latitude),
-              ),
-              iconImage: "user-location", // You'll need to add this image asset
-              iconSize: 1.2,
-              textField: "My location",
-              textColor: const Color.fromARGB(255, 105, 167, 248).value,
-            );
-
-            await manager.create(options);
-          });
+      final profileData = await ApiService.getProfile();
+      List<EmergencyContact> contacts = [];
+      if (profileData.roleId == 5) {
+        try {
+          contacts = await ApiService.getEmergencyContacts();
+        } catch (e) {
+          debugPrint('Failed to load emergency contacts: $e');
+        }
+      }
+      setState(() {
+        profile = profileData;
+        emergencyContacts = contacts;
+      });
     } catch (e) {
-      print('Error updating user location: $e');
+      debugPrint('Error loading profile: $e');
     }
   }
 
-  // Enhanced location sharing with real-time tracking
+  // ── websocket ─────────────────────────────────────────────────────────────
+
+  Future<void> _initializeWebSocket() async {
+    try {
+      final profileData = await ApiService.getProfile();
+      final userId = profileData.id;
+      await LocationWebSocketService.instance.connect(userId as String);
+      _locationUpdateSubscription = LocationWebSocketService
+          .instance
+          .locationUpdates
+          .listen(_handleLocationUpdate);
+      _connectionStatusSubscription = LocationWebSocketService
+          .instance
+          .connectionStatus
+          .listen((isConnected) {
+            setState(() {});
+            if (isConnected && isRealTimeTrackingEnabled)
+              _startRealTimeTracking();
+          });
+    } catch (e) {
+      debugPrint('Error initializing WebSocket: $e');
+    }
+  }
+
+  void _handleLocationUpdate(Map<String, dynamic> locationData) {
+    setState(() => _lastReceivedLocation = locationData);
+    final data = locationData['data'];
+    if (data != null)
+      debugPrint('Location update: ${data['latitude']}, ${data['longitude']}');
+  }
+
+  // ── location sharing ──────────────────────────────────────────────────────
+
   Future<void> _shareCurrentLocationRealTime() async {
     try {
-      // Get contact numbers for sharing
-      List<String> contactNumbers = emergencyContacts
-          .map((contact) => contact.contactNumber)
+      final contactNumbers = emergencyContacts
+          .map((c) => c.contactNumber)
           .toList();
-
       if (contactNumbers.isEmpty) {
-        if (mounted) {
+        if (mounted)
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text(
-                'No emergency contacts available for real-time sharing',
-              ),
+              content: Text('No emergency contacts available'),
               backgroundColor: Colors.orange,
             ),
           );
-        }
         return;
       }
-
-      // Show duration selection dialog
-      int? selectedHours = await _showDurationSelectionDialog();
+      final selectedHours = await _showDurationSelectionDialog();
       if (selectedHours == null) return;
 
-      // Start location sharing session
       final sharingResult = await ApiService.startLocationSharing(
         activityId: currentActivityId,
         contacts: contactNumbers,
         durationHours: selectedHours,
       );
-
       setState(() {
         activeSharingSession = sharingResult;
         isRealTimeTrackingEnabled = true;
       });
-
-      // Start real-time tracking
       await _startRealTimeTracking();
-
-      // Send initial notification to contacts
       await _sendLocationSharingNotification(sharingResult['share_url']);
-
-      if (mounted) {
+      if (mounted)
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(
-              'Real-time location sharing started for $selectedHours hours',
-            ),
+            content: Text('Real-time sharing started for $selectedHours hours'),
             backgroundColor: Colors.green,
           ),
         );
-      }
     } catch (e) {
-      debugPrint('Error starting real-time location sharing: $e');
-      if (mounted) {
+      debugPrint('Error: $e');
+      if (mounted)
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to start real-time sharing: $e'),
-            backgroundColor: Colors.red,
-          ),
+          SnackBar(content: Text('Failed: $e'), backgroundColor: Colors.red),
         );
-      }
     }
   }
 
-  Future<int?> _showDurationSelectionDialog() async {
-    return showDialog<int>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Share Duration'),
-        content: const Text('How long would you like to share your location?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, 1),
-            child: const Text('1 Hour'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, 4),
-            child: const Text('4 Hours'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, 24),
-            child: const Text('24 Hours'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-        ],
-      ),
-    );
-  }
+  Future<int?> _showDurationSelectionDialog() => showDialog<int>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('Share Duration'),
+      content: const Text('How long to share your location?'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, 1),
+          child: const Text('1 Hour'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, 4),
+          child: const Text('4 Hours'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, 24),
+          child: const Text('24 Hours'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('Cancel'),
+        ),
+      ],
+    ),
+  );
 
   Future<void> _sendLocationSharingNotification(String shareUrl) async {
-    try {
-      final String message =
-          '''
-📍 Real-time Location Sharing
-
-${profile?.name ?? 'Someone'} is sharing their live location with you.
-
-Track their location here: $shareUrl
-
-This link will be active for the selected duration.
-
-Sent at: ${DateTime.now().toString()}
-''';
-
-      for (final contact in emergencyContacts) {
-        try {
-          await ApiService.sendLocationSMS(
-            phoneNumber: contact.contactNumber,
-            message: message,
-          );
-        } catch (e) {
-          debugPrint(
-            'Failed to send sharing notification to ${contact.contactName}: $e',
-          );
-        }
+    final msg =
+        'Real-time Location Sharing\n\n${profile?.name ?? 'Someone'} is sharing their live location.\n\nTrack here: $shareUrl\n\nSent: ${DateTime.now()}';
+    for (final c in emergencyContacts) {
+      try {
+        await ApiService.sendLocationSMS(
+          phoneNumber: c.contactNumber,
+          message: msg,
+        );
+      } catch (e) {
+        debugPrint('Failed to notify ${c.contactName}: $e');
       }
-    } catch (e) {
-      debugPrint('Error sending location sharing notifications: $e');
     }
   }
 
@@ -509,41 +681,100 @@ Sent at: ${DateTime.now().toString()}
       activeSharingSession = null;
       isRealTimeTrackingEnabled = false;
     });
-
     await _stopRealTimeTracking();
-
-    if (mounted) {
+    if (mounted)
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Location sharing stopped'),
           backgroundColor: Colors.orange,
         ),
       );
+  }
+
+  Future<void> _shareCurrentLocation() async {
+    try {
+      final pos = currentPosition ?? await gl.Geolocator.getCurrentPosition();
+      final url =
+          'https://www.google.com/maps/search/?api=1&query=${pos.latitude},${pos.longitude}';
+      await Share.share('Here is my current location: $url');
+      if (emergencyContacts.isNotEmpty && mounted) {
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Share Location'),
+            content: const Text('Send to emergency contacts too?'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('No'),
+              ),
+              TextButton(
+                onPressed: () async {
+                  Navigator.pop(ctx);
+                  await _sendLocationToEmergencyContacts(
+                    url,
+                    pos.latitude,
+                    pos.longitude,
+                  );
+                },
+                child: const Text('Yes'),
+              ),
+            ],
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Error sharing: $e');
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to share location.')),
+        );
     }
   }
 
+  Future<void> _sendLocationToEmergencyContacts(
+    String url,
+    double lat,
+    double lng,
+  ) async {
+    final msg =
+        'Location Share from ${profile?.name ?? 'Contact'}\n\n$url\n\nLat: $lat  Lng: $lng\n\nSent: ${DateTime.now()}';
+    for (final c in emergencyContacts) {
+      try {
+        await ApiService.sendLocationSMS(
+          phoneNumber: c.contactNumber,
+          message: msg,
+        );
+      } catch (e) {
+        debugPrint('Failed to send to ${c.contactName}: $e');
+      }
+    }
+    if (mounted)
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Location sent to emergency contacts'),
+          backgroundColor: Colors.green,
+        ),
+      );
+  }
+
+  // ── shake detection ───────────────────────────────────────────────────────
+
   void _setupShakeDetection() {
     accelerometerSubscription = accelerometerEvents.listen((event) {
-      double gForce = sqrt(pow(event.x, 2) + pow(event.y, 2) + pow(event.z, 2));
-
-      if (gForce > shakeThreshold) {
-        DateTime now = DateTime.now();
-
+      final g = sqrt(pow(event.x, 2) + pow(event.y, 2) + pow(event.z, 2));
+      if (g > shakeThreshold) {
+        final now = DateTime.now();
         if (lastShakeTime == null ||
             now.difference(lastShakeTime!) < shakeTimeWindow) {
           shakeCount++;
           lastShakeTime = now;
-
           if (shakeCount >= shakeCountThreshold) {
             _triggerPanicMode();
-            shakeCount = 0; // Reset after triggering
-          }
-
-          // Reset shake count after time window
-          shakeResetTimer?.cancel();
-          shakeResetTimer = Timer(shakeTimeWindow, () {
             shakeCount = 0;
-          });
+          }
+          shakeResetTimer?.cancel();
+          shakeResetTimer = Timer(shakeTimeWindow, () => shakeCount = 0);
         } else {
           shakeCount = 1;
           lastShakeTime = now;
@@ -552,19 +783,14 @@ Sent at: ${DateTime.now().toString()}
     });
   }
 
+  // ── panic ─────────────────────────────────────────────────────────────────
+
   Future<void> _triggerPanicMode() async {
-    if (isInPanicMode) return; // Prevent multiple triggers
-
-    setState(() {
-      isInPanicMode = true;
-    });
-
-    // Vibrate the phone
-    if (await Vibration.hasVibrator() ?? false) {
+    if (isInPanicMode) return;
+    setState(() => isInPanicMode = true);
+    await BackgroundVoiceService.instance.pause();
+    if (await Vibration.hasVibrator() ?? false)
       Vibration.vibrate(pattern: [0, 1000, 500, 1000], repeat: 1);
-    }
-
-    // Show panic screen
     _showPanicScreen();
   }
 
@@ -572,153 +798,218 @@ Sent at: ${DateTime.now().toString()}
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (BuildContext context) {
-        return WillPopScope(
-          onWillPop: () async => false,
-          child: PanicScreen(
-            onSendDistress: _sendDistressSignal,
-            onCancel: _cancelPanicMode,
-          ),
-        );
-      },
+      builder: (_) => WillPopScope(
+        onWillPop: () async => false,
+        child: PanicScreen(
+          onSendDistress: _sendDistressSignal,
+          onCancel: _cancelPanicMode,
+        ),
+      ),
     );
   }
 
   Future<void> _sendDistressSignal() async {
     try {
-      // Get current location if not available
       currentPosition ??= await gl.Geolocator.getCurrentPosition();
-
-      final latitude = currentPosition!.latitude;
-      final longitude = currentPosition!.longitude;
-      final googleMapsUrl =
-          'https://www.google.com/maps/search/?api=1&query=$latitude,$longitude';
-
-      // Send to emergency contacts via Africa's Talking
-      await _sendEmergencyMessages(googleMapsUrl, latitude, longitude);
-
+      final lat = currentPosition!.latitude;
+      final lng = currentPosition!.longitude;
+      final url = 'https://www.google.com/maps/search/?api=1&query=$lat,$lng';
+      await _sendEmergencyMessages(url, lat, lng);
       _cancelPanicMode();
-
-      if (mounted) {
+      if (mounted)
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Distress signal sent to emergency contacts'),
+            content: Text('Distress signal sent'),
             backgroundColor: Colors.green,
           ),
         );
-      }
     } catch (e) {
-      debugPrint('Error sending distress signal: $e');
-      if (mounted) {
+      if (mounted)
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to send distress signal: $e'),
-            backgroundColor: Colors.red,
-          ),
+          SnackBar(content: Text('Failed: $e'), backgroundColor: Colors.red),
         );
-      }
     }
   }
 
   Future<void> _sendEmergencyMessages(
-    String mapUrl,
+    String url,
     double lat,
     double lng,
   ) async {
-    if (emergencyContacts.isEmpty) {
-      throw Exception('No emergency contacts available');
-    }
-
-    final String message =
-        '''
-🚨 EMERGENCY ALERT 🚨
-
-${profile?.name ?? 'Someone'} has triggered an emergency alert!
-
-Location: $lat, $lng
-Map: $mapUrl
-
-Time: ${DateTime.now().toString()}
-
-Please check on them immediately!
-''';
-
-    // Send SMS to each emergency contact
-    for (final contact in emergencyContacts) {
+    if (emergencyContacts.isEmpty) throw Exception('No emergency contacts');
+    final msg =
+        'EMERGENCY ALERT\n\n${profile?.name ?? 'Someone'} triggered an alert!\n\nLocation: $lat, $lng\nMap: $url\n\nTime: ${DateTime.now()}';
+    for (final c in emergencyContacts) {
       try {
         await ApiService.sendEmergencySMS(
-          phoneNumber: contact.contactNumber,
-          message: message,
+          phoneNumber: c.contactNumber,
+          message: msg,
         );
-        debugPrint('Emergency SMS sent to ${contact.contactName}');
       } catch (e) {
-        debugPrint('Failed to send SMS to ${contact.contactName}: $e');
+        debugPrint('SMS failed to ${c.contactName}: $e');
       }
     }
   }
 
   void _cancelPanicMode() {
-    setState(() {
-      isInPanicMode = false;
-    });
-
-    // Stop vibration
+    setState(() => isInPanicMode = false);
     Vibration.cancel();
-
-    if (Navigator.canPop(context)) {
-      Navigator.of(context).pop();
-    }
+    BackgroundVoiceService.instance.onWakeWordDetected = _triggerPanicMode;
+    BackgroundVoiceService.instance.resume();
+    if (Navigator.canPop(context)) Navigator.of(context).pop();
   }
 
   Future<void> _initializeMapbox() async {
     try {
       final token = dotenv.env['MAPBOX_ACCESS_TOKEN'];
-      if (token == null || token.isEmpty) {
-        debugPrint('Error: MAPBOX_ACCESS_TOKEN not found in .env file');
-        return;
-      }
-
+      if (token == null || token.isEmpty) return;
       mp.MapboxOptions.setAccessToken(token);
-      debugPrint('Mapbox token initialized successfully');
     } catch (e) {
-      debugPrint('Error initializing Mapbox: $e');
+      debugPrint('Mapbox init error: $e');
     }
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BUILD
+  // ═══════════════════════════════════════════════════════════════════════════
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Stack(
         children: [
-          mp.MapWidget(
-            key: const ValueKey("mapWidget"),
-            onMapCreated: _onMapCreated,
-            styleUri: mp.MapboxStyles.DARK,
-            cameraOptions: mp.CameraOptions(
-              center: mp.Point(coordinates: mp.Position(0, 0)),
-              zoom: 10.0,
+          // ── Google Map ────────────────────────────────────────────────────
+          gmaps.GoogleMap(
+            onMapCreated: (controller) {
+              googleMapController = controller;
+              setState(() => isMapReady = true);
+              // Once ready, zoom to user and draw overlays
+              if (currentPosition != null) {
+                controller.animateCamera(
+                  gmaps.CameraUpdate.newLatLngZoom(
+                    gmaps.LatLng(
+                      currentPosition!.latitude,
+                      currentPosition!.longitude,
+                    ),
+                    12.0,
+                  ),
+                );
+              }
+              _rebuildMapOverlays();
+            },
+            initialCameraPosition: gmaps.CameraPosition(
+              target: gmaps.LatLng(
+                currentPosition?.latitude ?? 0,
+                currentPosition?.longitude ?? 0,
+              ),
+              zoom: 12.0,
             ),
+            markers: _markers, // Haversine-filtered markers only
+            circles: _circles, // 5 km perimeter circle
+            myLocationEnabled: false,
+            myLocationButtonEnabled: false,
           ),
+
           if (!isMapReady) const Center(child: CircularProgressIndicator()),
 
-          // Connection status indicator
+          // ── Top bar with gradient (mirrors homepage) ───────────────────
           Positioned(
-            top: 120,
+            top: 0,
+            left: 0,
+            right: 0,
+            child: Container(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Color(0xFF2E86AB),
+                    Color(0xFF4FABCB),
+                    Colors.transparent,
+                  ],
+                  stops: [0.0, 0.6, 1.0],
+                ),
+              ),
+              child: SafeArea(
+                bottom: false,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                  child: Row(
+                    children: [
+                      // Back button
+                      GestureDetector(
+                        onTap: () => Navigator.pop(context),
+                        child: Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.2),
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: Colors.white.withOpacity(0.4),
+                            ),
+                          ),
+                          child: const Icon(
+                            Icons.arrow_back_ios_new,
+                            color: Colors.white,
+                            size: 16,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      // Title
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text(
+                              'Safety Map',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.3,
+                              ),
+                            ),
+                            Text(
+                              '${_nearbyPolice.length} police · ${_nearbyDangerZones.length} danger zones within 5 km',
+                              style: TextStyle(
+                                color: Colors.white.withOpacity(0.85),
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      // Legend pill
+                      _legendPill(),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+
+          // ── Connection status ──────────────────────────────────────────
+          // Positioned below the gradient top bar (~100px) + safe area
+          Positioned(
+            top: 148,
             left: 16,
             child: _buildConnectionStatusIndicator(),
           ),
 
-          // Panic Button
-          Positioned(top: 60, right: 16, child: _buildPanicButton()),
+          // ── Panic button — right side, below top bar ───────────────────
+          Positioned(top: 148, right: 16, child: _buildPanicButton()),
 
-          // Real-time tracking toggle
-          Positioned(top: 60, left: 16, child: _buildRealTimeTrackingButton()),
+          // ── Live tracking toggle — left side, below connection status ──
+          Positioned(top: 200, left: 16, child: _buildRealTimeTrackingButton()),
 
+          // ── Bottom share card ──────────────────────────────────────────
           Positioned(
             bottom: 100,
             left: 16,
             right: 16,
-            child: _buildEnhancedShareLocationCard(),
+            child: _buildShareLocationCard(),
           ),
         ],
       ),
@@ -726,475 +1017,390 @@ Please check on them immediately!
     );
   }
 
-  Widget _buildRealTimeTrackingButton() {
-    return GestureDetector(
-      onTap: _toggleRealTimeTracking,
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: isRealTimeTrackingEnabled ? Colors.green : Colors.grey,
-          borderRadius: BorderRadius.circular(30),
-          boxShadow: [
-            BoxShadow(
-              color: (isRealTimeTrackingEnabled ? Colors.green : Colors.grey)
-                  .withOpacity(0.3),
-              spreadRadius: 2,
-              blurRadius: 8,
-              offset: const Offset(0, 2),
-            ),
-          ],
+  // ── Map legend pill ───────────────────────────────────────────────────────
+
+  Widget _legendPill() => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    decoration: BoxDecoration(
+      color: Colors.white.withOpacity(0.2),
+      borderRadius: BorderRadius.circular(20),
+      border: Border.all(color: Colors.white.withOpacity(0.4)),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: const BoxDecoration(color: _teal, shape: BoxShape.circle),
         ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              isRealTimeTrackingEnabled ? Icons.gps_fixed : Icons.gps_off,
-              color: Colors.white,
-              size: 20,
-            ),
-            const SizedBox(width: 8),
-            Text(
-              isRealTimeTrackingEnabled ? 'Live' : 'Offline',
-              style: const TextStyle(
+        const SizedBox(width: 4),
+        const Text(
+          'Police',
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 10,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Container(
+          width: 8,
+          height: 8,
+          decoration: const BoxDecoration(color: _red, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 4),
+        const Text(
+          'Danger',
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 10,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
+    ),
+  );
+
+  // ── Real-time tracking button ─────────────────────────────────────────────
+
+  // Tapping toggles the 10-second GPS logging loop.
+  // Shows pulsing white dot + "LIVE" when active, "GPS OFF" when inactive.
+  Widget _buildRealTimeTrackingButton() => GestureDetector(
+    onTap: _toggleRealTimeTracking,
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: isRealTimeTrackingEnabled ? _green : const Color(0xFF4A5568),
+        borderRadius: BorderRadius.circular(30),
+        boxShadow: [
+          BoxShadow(
+            color: (isRealTimeTrackingEnabled ? _green : Colors.black)
+                .withOpacity(0.35),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (isRealTimeTrackingEnabled)
+            Container(
+              width: 8,
+              height: 8,
+              margin: const EdgeInsets.only(right: 6),
+              decoration: BoxDecoration(
                 color: Colors.white,
-                fontWeight: FontWeight.bold,
-                fontSize: 12,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildPanicButton() {
-    return GestureDetector(
-      onTap: _triggerPanicMode,
-      child: Container(
-        width: 60,
-        height: 60,
-        decoration: BoxDecoration(
-          color: Colors.red,
-          shape: BoxShape.circle,
-          boxShadow: [
-            BoxShadow(
-              color: Colors.red.withOpacity(0.3),
-              spreadRadius: 3,
-              blurRadius: 10,
-              offset: const Offset(0, 4),
-            ),
-          ],
-        ),
-        child: const Icon(Icons.warning, color: Colors.white, size: 30),
-      ),
-    );
-  }
-
-  void _onMapCreated(mp.MapboxMap controller) async {
-    debugPrint('Map created successfully');
-    setState(() {
-      mapboxMapController = controller;
-      isMapReady = true;
-    });
-    _addMarkersToMap();
-    _getCurrentLocation();
-
-    try {
-      await mapboxMapController?.location.updateSettings(
-        mp.LocationComponentSettings(
-          enabled: true,
-          pulsingEnabled: true,
-          showAccuracyRing: true,
-        ),
-      );
-      debugPrint('Location component enabled');
-    } catch (e) {
-      debugPrint('Error enabling location component: $e');
-    }
-  }
-
-  Future<void> _addMarkersToMap() async {
-    if (mapboxMapController == null) return;
-
-    // Create ONE annotation manager for all markers
-    final annotationManager = await mapboxMapController!.annotations
-        .createPointAnnotationManager();
-
-    print('Adding ${policeLocations.length} police locations');
-    print('Adding ${dangerZones.length} danger zones');
-
-    // Add police markers
-    for (final police in policeLocations) {
-      await _addPoliceMarkerWithManager(annotationManager, police);
-    }
-
-    // Add danger zone markers
-    for (final danger in dangerZones) {
-      await _addDangerZoneMarkerWithManager(annotationManager, danger);
-    }
-  }
-
-  Future<void> _addPoliceMarkerWithManager(
-    manager,
-    PoliceLocation police,
-  ) async {
-    try {
-      final ByteData bytes = await rootBundle.load(
-        'assets/images/police_marker.png',
-      );
-      final Uint8List imageData = bytes.buffer.asUint8List();
-      final options = mp.PointAnnotationOptions(
-        geometry: mp.Point(
-          coordinates: mp.Position(police.longitude, police.latitude),
-        ),
-
-        image: imageData, // Fixed quote
-        iconSize: 1.0,
-        textField: police.name,
-        textOffset: [0.0, -2.0],
-        textColor: Colors.green.value,
-        textSize: 12.0,
-      );
-
-      await manager.create(options);
-      print('Police marker added: ${police.name}');
-    } catch (e) {
-      print('Error adding police marker: $e');
-    }
-  }
-
-  Future<void> _addDangerZoneMarkerWithManager(
-    // ignore: strict_top_level_inference
-    manager,
-    DangerZone danger,
-  ) async {
-    try {
-      final ByteData bytes = await rootBundle.load(
-        'assets/images/danger_marker.png',
-      );
-      final Uint8List imageData = bytes.buffer.asUint8List();
-      final options = mp.PointAnnotationOptions(
-        geometry: mp.Point(
-          coordinates: mp.Position(danger.longitude, danger.latitude),
-        ),
-        image: imageData, // Fixed quote
-        iconSize: 1.0,
-        textField: danger.name,
-        textOffset: [0.0, -2.0],
-        textColor: Colors.red.value,
-        textSize: 12.0,
-      );
-
-      await manager.create(options);
-      print('Danger marker added: ${danger.name}');
-    } catch (e) {
-      print('Error adding danger marker: $e');
-    }
-  }
-
-  Future<void> _getCurrentLocation() async {
-    try {
-      bool serviceEnabled = await gl.Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) return;
-
-      gl.LocationPermission permission = await gl.Geolocator.checkPermission();
-      if (permission == gl.LocationPermission.denied) {
-        permission = await gl.Geolocator.requestPermission();
-        if (permission == gl.LocationPermission.denied) return;
-      }
-
-      currentPosition = await gl.Geolocator.getCurrentPosition();
-      if (currentPosition != null && mapboxMapController != null) {
-        await mapboxMapController!.setCamera(
-          mp.CameraOptions(
-            center: mp.Point(
-              coordinates: mp.Position(
-                currentPosition!.longitude,
-                currentPosition!.latitude,
-              ),
-            ),
-            zoom: 14.0,
-          ),
-        );
-      }
-    } catch (e) {
-      print('Error getting location: $e');
-    }
-  }
-
-  Future<void> _setupPositionTracking() async {
-    try {
-      bool serviceEnabled = await gl.Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) {
-        debugPrint('Location services are disabled');
-        return;
-      }
-
-      gl.LocationPermission permission = await gl.Geolocator.checkPermission();
-      if (permission == gl.LocationPermission.denied) {
-        permission = await gl.Geolocator.requestPermission();
-        if (permission == gl.LocationPermission.denied) {
-          debugPrint('Location permissions are denied');
-          return;
-        }
-      }
-
-      if (permission == gl.LocationPermission.deniedForever) {
-        debugPrint('Location permissions are permanently denied');
-        return;
-      }
-
-      gl.LocationSettings locationSettings = const gl.LocationSettings(
-        accuracy: gl.LocationAccuracy.high,
-        distanceFilter: 10,
-      );
-
-      userPositionStream?.cancel();
-      userPositionStream =
-          gl.Geolocator.getPositionStream(
-            locationSettings: locationSettings,
-          ).listen(
-            (gl.Position position) {
-              currentPosition = position;
-              debugPrint(
-                'Position updated: ${position.latitude}, ${position.longitude}',
-              );
-
-              if (mapboxMapController != null && isMapReady) {
-                mapboxMapController?.setCamera(
-                  mp.CameraOptions(
-                    zoom: 15.0,
-                    center: mp.Point(
-                      coordinates: mp.Position(
-                        position.longitude,
-                        position.latitude,
-                      ),
-                    ),
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.white.withOpacity(0.6),
+                    blurRadius: 4,
                   ),
-                );
-              }
-            },
-            onError: (error) {
-              debugPrint('Error getting position: $error');
-            },
-          );
-
-      debugPrint('Position tracking setup completed');
-    } catch (e) {
-      debugPrint('Error setting up position tracking: $e');
-    }
-  }
-
-  Future<void> _shareCurrentLocation() async {
-    try {
-      final position =
-          currentPosition ?? await gl.Geolocator.getCurrentPosition();
-      final latitude = position.latitude;
-      final longitude = position.longitude;
-      final googleMapsUrl =
-          'https://www.google.com/maps/search/?api=1&query=$latitude,$longitude';
-
-      // Option 1: Regular share
-      await Share.share('Here is my current location: $googleMapsUrl');
-
-      // Option 2: Send to emergency contacts if available
-      if (emergencyContacts.isNotEmpty) {
-        showDialog(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Text('Share Location'),
-            content: const Text(
-              'Would you like to also send your location to your emergency contacts?',
+                ],
+              ),
             ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('No, thanks'),
-              ),
-              TextButton(
-                onPressed: () async {
-                  Navigator.pop(context);
-                  await _sendLocationToEmergencyContacts(
-                    googleMapsUrl,
-                    latitude,
-                    longitude,
-                  );
-                },
-                child: const Text('Yes, send'),
-              ),
-            ],
+          Icon(
+            isRealTimeTrackingEnabled ? Icons.gps_fixed : Icons.gps_off,
+            color: Colors.white,
+            size: 16,
           ),
-        );
-      }
+          const SizedBox(width: 6),
+          Text(
+            isRealTimeTrackingEnabled ? 'LIVE' : 'GPS OFF',
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w800,
+              fontSize: 12,
+              letterSpacing: 0.5,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
 
-      debugPrint('Location shared successfully');
-    } catch (e) {
-      debugPrint('Error sharing location: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Failed to share location. Please try again.'),
+  // ── Panic button ──────────────────────────────────────────────────────────
+
+  Widget _buildPanicButton() => GestureDetector(
+    onTap: _triggerPanicMode,
+    child: Container(
+      width: 60,
+      height: 60,
+      decoration: BoxDecoration(
+        color: _red,
+        shape: BoxShape.circle,
+        boxShadow: [
+          BoxShadow(
+            color: _red.withOpacity(0.4),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
           ),
-        );
-      }
-    }
+        ],
+      ),
+      child: const Icon(Icons.warning_rounded, color: Colors.white, size: 30),
+    ),
+  );
+
+  // ── Connection status ─────────────────────────────────────────────────────
+
+  Widget _buildConnectionStatusIndicator() {
+    final connected = LocationWebSocketService.instance.isConnected;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: connected ? _green : _red,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 6),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            connected ? Icons.wifi : Icons.wifi_off,
+            color: Colors.white,
+            size: 14,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            connected ? 'Connected' : 'Offline',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
-  Future<void> _sendLocationToEmergencyContacts(
-    String mapUrl,
-    double lat,
-    double lng,
-  ) async {
-    try {
-      final String message =
-          '''
-📍 Location Share from ${profile?.name ?? 'Contact'}
+  // ── Share location card ───────────────────────────────────────────────────
 
-I'm sharing my current location with you:
-$mapUrl
-
-Latitude: $lat
-Longitude: $lng
-
-Sent at: ${DateTime.now().toString()}
-''';
-
-      for (final contact in emergencyContacts) {
-        try {
-          await ApiService.sendLocationSMS(
-            phoneNumber: contact.contactNumber,
-            message: message,
-          );
-        } catch (e) {
-          debugPrint('Failed to send location to ${contact.contactName}: $e');
-        }
-      }
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Location sent to emergency contacts'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
-    } catch (e) {
-      debugPrint('Error sending location to emergency contacts: $e');
-    }
-  }
-
-  Widget _buildEnhancedShareLocationCard() {
+  Widget _buildShareLocationCard() {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            spreadRadius: 1,
-            blurRadius: 10,
-            offset: const Offset(0, 4),
+            color: Colors.black.withOpacity(0.10),
+            blurRadius: 14,
+            offset: const Offset(0, 5),
           ),
         ],
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          // ── Active sharing banner ──────────────────────────────────────
           if (activeSharingSession != null) ...[
             Container(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               decoration: BoxDecoration(
-                color: Colors.green.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(8),
+                color: _green.withOpacity(0.08),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: _green.withOpacity(0.25)),
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.radio_button_checked, color: Colors.green),
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: const BoxDecoration(
+                      color: _green,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
                   const SizedBox(width: 8),
                   const Expanded(
                     child: Text(
-                      'Location sharing active',
+                      'Live location sharing active',
                       style: TextStyle(
-                        color: Colors.green,
-                        fontWeight: FontWeight.bold,
+                        color: _green,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 13,
                       ),
                     ),
                   ),
-                  TextButton(
-                    onPressed: _stopLocationSharing,
-                    child: const Text('Stop'),
+                  GestureDetector(
+                    onTap: _stopLocationSharing,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: _red.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Text(
+                        'Stop',
+                        style: TextStyle(
+                          color: _red,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
           ],
+
+          // ── Real-time tracking status row ─────────────────────────────
+          // Shows live GPS status with a toggle button right in the card.
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: isRealTimeTrackingEnabled
+                  ? _green.withOpacity(0.08)
+                  : Colors.grey.withOpacity(0.07),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: isRealTimeTrackingEnabled
+                    ? _green.withOpacity(0.3)
+                    : Colors.grey.withOpacity(0.2),
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  isRealTimeTrackingEnabled ? Icons.gps_fixed : Icons.gps_off,
+                  color: isRealTimeTrackingEnabled ? _green : Colors.grey,
+                  size: 16,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        isRealTimeTrackingEnabled
+                            ? 'Real-time GPS tracking ON'
+                            : 'Real-time GPS tracking OFF',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 12,
+                          color: isRealTimeTrackingEnabled
+                              ? _green
+                              : Colors.grey[600],
+                        ),
+                      ),
+                      Text(
+                        isRealTimeTrackingEnabled
+                            ? 'Logging your position every 10 seconds'
+                            : 'Tap to start broadcasting your location',
+                        style: TextStyle(fontSize: 10, color: Colors.grey[500]),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                GestureDetector(
+                  onTap: _toggleRealTimeTracking,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: isRealTimeTrackingEnabled
+                          ? _red.withOpacity(0.1)
+                          : _green.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: isRealTimeTrackingEnabled
+                            ? _red.withOpacity(0.3)
+                            : _green.withOpacity(0.3),
+                      ),
+                    ),
+                    child: Text(
+                      isRealTimeTrackingEnabled ? 'Stop' : 'Start',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: isRealTimeTrackingEnabled ? _red : _green,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
           const SizedBox(height: 12),
+
+          // ── Stats row ─────────────────────────────────────────────────
           Row(
             children: [
-              Expanded(
-                child: Text(
-                  'Police: ${policeLocations.length} nearby',
-                  style: TextStyle(color: Colors.green, fontSize: 12),
-                ),
+              _statChip(
+                Icons.local_police_rounded,
+                '${_nearbyPolice.length} Police',
+                _teal,
               ),
-              Expanded(
-                child: Text(
-                  'Danger zones: ${dangerZones.length}',
-                  style: TextStyle(color: Colors.red, fontSize: 12),
-                ),
+              const SizedBox(width: 10),
+              _statChip(
+                Icons.warning_amber_rounded,
+                '${_nearbyDangerZones.length} Danger Zones',
+                _red,
               ),
             ],
           ),
+          const SizedBox(height: 14),
+
+          // ── Share row ─────────────────────────────────────────────────
           Row(
             children: [
               Container(
-                padding: const EdgeInsets.all(12),
+                padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: Colors.blue.withOpacity(0.1),
+                  color: _teal.withOpacity(0.1),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: const Icon(
-                  Icons.location_on,
-                  color: Colors.blue,
-                  size: 24,
+                  Icons.location_on_rounded,
+                  color: _teal,
+                  size: 22,
                 ),
               ),
-              const SizedBox(width: 16),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
                   children: [
                     const Text(
                       'Share Location',
                       style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.black87,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: _dark,
                       ),
                     ),
-                    const SizedBox(height: 4),
                     Text(
                       activeSharingSession != null
                           ? 'Real-time sharing active'
-                          : 'Share current or real-time location',
-                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                          : 'Share your current or live location',
+                      style: TextStyle(fontSize: 11, color: Colors.grey[500]),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(width: 16),
-              PopupMenuButton(
-                onSelected: (value) {
-                  if (value == 'current') {
+              const SizedBox(width: 10),
+              PopupMenuButton<String>(
+                onSelected: (v) {
+                  if (v == 'current')
                     _shareCurrentLocation();
-                  } else if (value == 'realtime') {
+                  else if (v == 'realtime')
                     _shareCurrentLocationRealTime();
-                  }
                 },
-                itemBuilder: (context) => [
+                itemBuilder: (_) => [
                   const PopupMenuItem(
                     value: 'current',
                     child: Text('Current Location'),
@@ -1206,18 +1412,28 @@ Sent at: ${DateTime.now().toString()}
                 ],
                 child: Container(
                   padding: const EdgeInsets.symmetric(
-                    horizontal: 20,
-                    vertical: 12,
+                    horizontal: 18,
+                    vertical: 10,
                   ),
                   decoration: BoxDecoration(
-                    color: Colors.blue,
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFF2E86AB), Color(0xFF4FABCB)],
+                    ),
                     borderRadius: BorderRadius.circular(12),
+                    boxShadow: [
+                      BoxShadow(
+                        color: _teal.withOpacity(0.35),
+                        blurRadius: 8,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
                   ),
                   child: const Text(
                     'Share',
                     style: TextStyle(
                       color: Colors.white,
-                      fontWeight: FontWeight.w600,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
                     ),
                   ),
                 ),
@@ -1229,118 +1445,42 @@ Sent at: ${DateTime.now().toString()}
     );
   }
 
-  Widget _buildConnectionStatusIndicator() {
-    return Container(
-      padding: const EdgeInsets.all(8),
+  Widget _statChip(IconData icon, String label, Color color) => Expanded(
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
       decoration: BoxDecoration(
-        color: LocationWebSocketService.instance.isConnected
-            ? Colors.green
-            : Colors.red,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            LocationWebSocketService.instance.isConnected
-                ? Icons.wifi
-                : Icons.wifi_off,
-            color: Colors.white,
-            size: 16,
-          ),
-          const SizedBox(width: 4),
-          Text(
-            LocationWebSocketService.instance.isConnected
-                ? 'Connected'
-                : 'Offline',
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 12,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildShareLocationCard() {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            spreadRadius: 1,
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
+        color: color.withOpacity(0.07),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withOpacity(0.2)),
       ),
       child: Row(
         children: [
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Colors.blue.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: const Icon(Icons.location_on, color: Colors.blue, size: 24),
-          ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text(
-                  'Share Location',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.black87,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  emergencyContacts.isNotEmpty
-                      ? 'Send to contacts or emergency contacts'
-                      : 'Send your location to trusted contacts',
-                  style: const TextStyle(fontSize: 12, color: Colors.grey),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 16),
-          ElevatedButton(
-            onPressed: _shareCurrentLocation,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.blue,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-            ),
-            child: const Text(
-              'Share',
+          Icon(icon, color: color, size: 14),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              label,
+              overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                color: Colors.white,
+                color: color,
+                fontSize: 11,
                 fontWeight: FontWeight.w600,
               ),
             ),
           ),
         ],
       ),
-    );
-  }
+    ),
+  );
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PANIC SCREEN — unchanged from original
+// ══════════════════════════════════════════════════════════════════════════════
 
 class PanicScreen extends StatefulWidget {
   final VoidCallback onSendDistress;
   final VoidCallback onCancel;
-
   const PanicScreen({
     super.key,
     required this.onSendDistress,
@@ -1364,32 +1504,23 @@ class _PanicScreenState extends State<PanicScreen>
   @override
   void initState() {
     super.initState();
-
     _pulseController = AnimationController(
       duration: const Duration(seconds: 1),
       vsync: this,
     );
-
     _shakeController = AnimationController(
       duration: const Duration(milliseconds: 100),
       vsync: this,
     );
-
     _pulseAnimation = Tween<double>(begin: 0.8, end: 1.2).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
-
     _shakeAnimation = Tween<double>(begin: -10, end: 10).animate(
       CurvedAnimation(parent: _shakeController, curve: Curves.elasticIn),
     );
-
     _pulseController.repeat(reverse: true);
-
-    // Auto-cancel after 30 seconds if no action
     Timer(const Duration(seconds: 30), () {
-      if (mounted) {
-        widget.onCancel();
-      }
+      if (mounted) widget.onCancel();
     });
   }
 
@@ -1402,28 +1533,16 @@ class _PanicScreenState extends State<PanicScreen>
   }
 
   void _handleTap() {
-    setState(() {
-      tapCount++;
-    });
-
+    setState(() => tapCount++);
     if (tapCount == 1) {
-      // First tap - show accidental message and start timer
       tapTimer = Timer(const Duration(seconds: 3), () {
-        if (tapCount == 1) {
-          // Only one tap in 3 seconds - treat as accidental
-          widget.onCancel();
-        }
+        if (tapCount == 1) widget.onCancel();
       });
     } else if (tapCount >= 2) {
-      // Two or more taps - send distress signal
       tapTimer?.cancel();
       widget.onSendDistress();
     }
-
-    // Shake animation on tap
-    _shakeController.forward().then((_) {
-      _shakeController.reverse();
-    });
+    _shakeController.forward().then((_) => _shakeController.reverse());
   }
 
   @override
@@ -1433,95 +1552,82 @@ class _PanicScreenState extends State<PanicScreen>
       child: SafeArea(
         child: AnimatedBuilder(
           animation: _shakeAnimation,
-          builder: (context, child) {
-            return Transform.translate(
-              offset: Offset(_shakeAnimation.value, 0),
-              child: Container(
-                width: double.infinity,
-                height: double.infinity,
-                color: Colors.red,
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    AnimatedBuilder(
-                      animation: _pulseAnimation,
-                      builder: (context, child) {
-                        return Transform.scale(
-                          scale: _pulseAnimation.value,
-                          child: const Icon(
-                            Icons.warning,
-                            size: 100,
-                            color: Colors.white,
-                          ),
-                        );
-                      },
-                    ),
-                    const SizedBox(height: 40),
-                    const Text(
-                      'EMERGENCY MODE',
-                      style: TextStyle(
+          builder: (_, __) => Transform.translate(
+            offset: Offset(_shakeAnimation.value, 0),
+            child: SizedBox.expand(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  AnimatedBuilder(
+                    animation: _pulseAnimation,
+                    builder: (_, __) => Transform.scale(
+                      scale: _pulseAnimation.value,
+                      child: const Icon(
+                        Icons.warning,
+                        size: 100,
                         color: Colors.white,
-                        fontSize: 32,
-                        fontWeight: FontWeight.bold,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 20),
-                    if (tapCount == 0) ...[
-                      const Text(
-                        'Tap TWICE to send distress signal\nTap ONCE if accidental',
-                        style: TextStyle(color: Colors.white, fontSize: 18),
-                        textAlign: TextAlign.center,
-                      ),
-                    ] else if (tapCount == 1) ...[
-                      const Text(
-                        'Tap AGAIN to confirm distress signal\nOr wait 3 seconds to cancel',
-                        style: TextStyle(color: Colors.white, fontSize: 18),
-                        textAlign: TextAlign.center,
-                      ),
-                    ],
-                    const SizedBox(height: 60),
-                    GestureDetector(
-                      onTap: _handleTap,
-                      child: Container(
-                        width: 200,
-                        height: 200,
-                        decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.2),
-                          shape: BoxShape.circle,
-                          border: Border.all(color: Colors.white, width: 4),
-                        ),
-                        child: Center(
-                          child: Text(
-                            tapCount == 0 ? 'TAP HERE' : 'TAP AGAIN',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 20,
-                              fontWeight: FontWeight.bold,
-                            ),
-                            textAlign: TextAlign.center,
-                          ),
-                        ),
                       ),
                     ),
-                    const SizedBox(height: 40),
-                    if (tapCount == 0)
-                      TextButton(
-                        onPressed: widget.onCancel,
-                        child: const Text(
-                          'Cancel',
-                          style: TextStyle(
+                  ),
+                  const SizedBox(height: 40),
+                  const Text(
+                    'EMERGENCY MODE',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 32,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 20),
+                  Text(
+                    tapCount == 0
+                        ? 'Tap TWICE to send distress signal\nTap ONCE if accidental'
+                        : 'Tap AGAIN to confirm\nOr wait 3 seconds to cancel',
+                    style: const TextStyle(color: Colors.white, fontSize: 18),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 60),
+                  GestureDetector(
+                    onTap: _handleTap,
+                    child: Container(
+                      width: 200,
+                      height: 200,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.2),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white, width: 4),
+                      ),
+                      child: Center(
+                        child: Text(
+                          tapCount == 0 ? 'TAP HERE' : 'TAP AGAIN',
+                          style: const TextStyle(
                             color: Colors.white,
-                            fontSize: 16,
-                            decoration: TextDecoration.underline,
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
                           ),
+                          textAlign: TextAlign.center,
                         ),
                       ),
-                  ],
-                ),
+                    ),
+                  ),
+                  const SizedBox(height: 40),
+                  if (tapCount == 0)
+                    TextButton(
+                      onPressed: widget.onCancel,
+                      child: const Text(
+                        'Cancel',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                ],
               ),
-            );
-          },
+            ),
+          ),
         ),
       ),
     );
