@@ -45,8 +45,7 @@ class _LegalAidRequestFormState extends State<LegalAidRequestForm>
 
   List<LegalAidProvider> _allProviders = [];
   LegalAidProvider? _selectedProvider;
-  // Kept for potential future filtering by expertise; currently unused.
-  // String? _selectedExpertiseArea;
+  String? _selectedExpertiseArea;
   bool _isLoadingProviders = false;
   bool _isSubmitting = false;
   bool isLoading = true;
@@ -284,10 +283,7 @@ class _LegalAidRequestFormState extends State<LegalAidRequestForm>
       gradient: const LinearGradient(
         begin: Alignment.topLeft,
         end: Alignment.bottomRight,
-        colors: [
-          _tealDark,
-          _teal,
-        ],
+        colors: [_tealDark, _teal],
       ),
       borderRadius: BorderRadius.circular(16),
       boxShadow: [

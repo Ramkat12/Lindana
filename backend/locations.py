@@ -631,7 +631,7 @@ async def track_user_location(
                 activity_name = activity.name
         
         # Replace with your actual Mapbox access token (get from https://mapbox.com)
-        MAPBOX_ACCESS_TOKEN = os.getenv("MAPBOX_WEB_TOKEN", "pk.eyJ1Ijoiam95a2lwa2VtYm9pIiwiYSI6ImNtY2J2MmlpZTAxbWIya3NhaWV1aTh5MTkifQ.-nLBrGjd639RrXjdXHq3HA")
+        MAPBOX_ACCESS_TOKEN = os.getenv("MAPBOX_WEB_TOKEN")
         
         html_content = f"""
         <!DOCTYPE html>
