@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:is_project_1/models/legal_tips_models.dart';
 import 'package:timeago/timeago.dart' as timeago;
 import 'dart:convert';
-import 'dart:typed_data';
 
 class LegalTipDetailPage extends StatefulWidget {
   final LegalTip tip;
@@ -15,35 +15,66 @@ class LegalTipDetailPage extends StatefulWidget {
   State<LegalTipDetailPage> createState() => _LegalTipDetailPageState();
 }
 
-class _LegalTipDetailPageState extends State<LegalTipDetailPage> {
-  String _baseUrl = 'https://d2d35afcbdcd.ngrok-free.app'; // fallback
+class _LegalTipDetailPageState extends State<LegalTipDetailPage>
+    with SingleTickerProviderStateMixin {
+  // ── Palette ────────────────────────────────────────────────────────────────
+  static const _bg = Color(0xFFFAF9F7);
+  static const _ink = Color(0xFF111827);
+  static const _inkMid = Color(0xFF374151);
+  static const _muted = Color(0xFF9CA3AF);
+  static const _teal = Color(0xFF4FABCB);
+  static const _tealDark = Color(0xFF2E86AB);
+  static const _accent = Color(0xFFE8F4F8);
+  static const _rule = Color(0xFFE5E7EB);
+  static const _white = Color(0xFFFFFFFF);
+
+  String _baseUrl = 'https://d2d35afcbdcd.ngrok-free.app';
+  bool _isBookmarked = false;
+
+  late AnimationController _animController;
+  late Animation<double> _fadeAnim;
+  late Animation<Offset> _slideAnim;
 
   @override
   void initState() {
     super.initState();
     _loadEnv();
+    _animController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 700),
+    );
+    _fadeAnim =
+        CurvedAnimation(parent: _animController, curve: Curves.easeOut);
+    _slideAnim = Tween<Offset>(
+      begin: const Offset(0, 0.06),
+      end: Offset.zero,
+    ).animate(
+        CurvedAnimation(parent: _animController, curve: Curves.easeOutCubic));
+    _animController.forward();
   }
 
   Future<void> _loadEnv() async {
     try {
       await dotenv.load(fileName: '.env');
-      setState(() {
-        _baseUrl = dotenv.env['API_BASE_URL'] ?? _baseUrl;
-      });
+      setState(() => _baseUrl = dotenv.env['API_BASE_URL'] ?? _baseUrl);
     } catch (e) {
       debugPrint('Error loading .env: $e');
     }
   }
 
-  // ── Image helpers ───────────────────────────────────────────────────────────
+  @override
+  void dispose() {
+    _animController.dispose();
+    super.dispose();
+  }
+
+  // ── Image helpers ──────────────────────────────────────────────────────────
 
   bool _isBase64(String str) {
     try {
       if (str.isEmpty) return false;
       final s = str.contains(',') ? str.split(',').last : str;
       if (s.isEmpty) return false;
-      final base64RegExp = RegExp(r'^[A-Za-z0-9+/]*={0,2}$');
-      if (!base64RegExp.hasMatch(s)) return false;
       base64Decode(s);
       return true;
     } catch (_) {
@@ -66,225 +97,484 @@ class _LegalTipDetailPageState extends State<LegalTipDetailPage> {
     }
   }
 
-  bool _isLocalPath(String path) =>
-      path.startsWith('/uploads/') ||
-      path.startsWith('uploads/') ||
-      path.contains('/uploads/');
+  bool _isLocalPath(String path) => path.contains('/uploads/');
 
-  // Uses the env-loaded base URL instead of a hardcoded string
-  String _buildFullUrl(String imagePath) {
-    if (imagePath.startsWith('/')) return '$_baseUrl$imagePath';
-    return '$_baseUrl/$imagePath';
-  }
+  String _buildFullUrl(String imagePath) =>
+      imagePath.startsWith('/') ? '$_baseUrl$imagePath' : '$_baseUrl/$imagePath';
 
   bool _isDataUri(String str) =>
       str.startsWith('data:image/') && str.contains(';base64,');
 
-  // ── Image widget ────────────────────────────────────────────────────────────
-
-  Widget _buildImageWidget() {
-    if (widget.tip.imageUrl == null || widget.tip.imageUrl!.isEmpty) {
-      return _placeholder();
-    }
-
-    final imageUrl = widget.tip.imageUrl!.trim();
-
-    // Local server path → build full URL using env base URL
-    if (_isLocalPath(imageUrl)) {
-      return _networkImage(_buildFullUrl(imageUrl));
-    }
-
-    // data:image/...;base64,...
-    if (_isDataUri(imageUrl)) {
-      return _memoryImage(_getBase64Data(imageUrl));
-    }
-
-    // Raw base64
-    if (_isBase64(imageUrl)) {
-      return _memoryImage(_getBase64Data(imageUrl));
-    }
-
-    // Full http/https URL
-    if (_isValidUrl(imageUrl)) {
-      return _networkImage(imageUrl);
-    }
-
-    return _placeholder();
+  Widget _buildHeroImage() {
+    final imageUrl = widget.tip.imageUrl?.trim() ?? '';
+    if (imageUrl.isEmpty) return _heroPlaceholder();
+    if (_isLocalPath(imageUrl)) return _netImg(_buildFullUrl(imageUrl));
+    if (_isDataUri(imageUrl)) return _b64Img(_getBase64Data(imageUrl));
+    if (_isBase64(imageUrl)) return _b64Img(_getBase64Data(imageUrl));
+    if (_isValidUrl(imageUrl)) return _netImg(imageUrl);
+    return _heroPlaceholder();
   }
 
-  Widget _networkImage(String url) => CachedNetworkImage(
+  Widget _netImg(String url) => CachedNetworkImage(
         imageUrl: url,
         fit: BoxFit.cover,
         width: double.infinity,
-        height: 250,
+        height: 280,
         placeholder: (_, __) => Container(
-          color: Colors.grey.shade200,
-          height: 250,
-          child: const Center(child: CircularProgressIndicator()),
+          height: 280,
+          color: _rule,
+          child: const Center(
+              child: CircularProgressIndicator(color: _teal, strokeWidth: 2)),
         ),
-        errorWidget: (_, __, ___) => _placeholder(),
+        errorWidget: (_, __, ___) => _heroPlaceholder(),
       );
 
-  Widget _memoryImage(String base64Data) {
+  Widget _b64Img(String data) {
     try {
-      final bytes = base64Decode(base64Data);
       return Image.memory(
-        bytes,
+        base64Decode(data),
         fit: BoxFit.cover,
         width: double.infinity,
-        height: 250,
-        errorBuilder: (_, __, ___) => _placeholder(),
+        height: 280,
+        errorBuilder: (_, __, ___) => _heroPlaceholder(),
       );
     } catch (_) {
-      return _placeholder();
+      return _heroPlaceholder();
     }
   }
 
-  Widget _placeholder() => Container(
+  Widget _heroPlaceholder() => Container(
+        height: 280,
         width: double.infinity,
-        height: 250,
-        decoration: BoxDecoration(
-          color: Colors.blue.shade50,
-          border: Border.all(color: Colors.blue.shade200),
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFF1A5F7A), _tealDark, _teal],
+          ),
         ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+        child: Stack(
           children: [
-            Icon(Icons.lightbulb_outline,
-                color: Colors.blue.shade400, size: 60),
-            const SizedBox(height: 8),
-            Text(
-              'Legal Tip',
-              style: TextStyle(
-                color: Colors.blue.shade600,
-                fontSize: 16,
-                fontWeight: FontWeight.w500,
+            Positioned(
+              top: -40,
+              right: -40,
+              child: Container(
+                width: 200,
+                height: 200,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _white.withOpacity(0.06),
+                ),
               ),
             ),
-          ],
-        ),
-      );
-
-  // ── Build ───────────────────────────────────────────────────────────────────
-
-  @override
-  Widget build(BuildContext context) {
-    final tip = widget.tip;
-
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text(
-          'Legal Tip',
-          style: TextStyle(
-              color: Colors.black87, fontWeight: FontWeight.bold),
-        ),
-        backgroundColor: Colors.white,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.black87),
-          onPressed: () => Navigator.pop(context),
-        ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.share, color: Colors.black87),
-            onPressed: () {
-              // TODO: implement share
-            },
-          ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Hero image
-            _buildImageWidget(),
-
-            Padding(
-              padding: const EdgeInsets.all(20),
+            Positioned(
+              bottom: -30,
+              left: 30,
+              child: Container(
+                width: 140,
+                height: 140,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _white.withOpacity(0.04),
+                ),
+              ),
+            ),
+            Center(
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  // Title
-                  Text(
-                    tip.title,
-                    style: const TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.black87,
-                      height: 1.3,
-                    ),
-                  ),
-
-                  const SizedBox(height: 16),
-
-                  // Provider + date card
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: Colors.grey.shade50,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: Colors.grey.shade200),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(Icons.person,
-                            color: Colors.grey.shade600, size: 20),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                tip.legalAidProvider?.fullName ??
-                                    'Legal Provider',
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w600,
-                                  color: Colors.black87,
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                'Published ${timeago.format(tip.publishedAt ?? tip.createdAt)}',
-                                style: TextStyle(
-                                  fontSize: 14,
-                                  color: Colors.grey.shade600,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-
-                  const SizedBox(height: 24),
-
-                  // Description
-                  const Text(
-                    'Description',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.black87,
-                    ),
-                  ),
+                  Icon(Icons.lightbulb_rounded,
+                      size: 64, color: _white.withOpacity(0.9)),
                   const SizedBox(height: 12),
                   Text(
-                    tip.description,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      color: Colors.black87,
-                      height: 1.6,
+                    'LEGAL TIP',
+                    style: TextStyle(
+                      color: _white.withOpacity(0.7),
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 3,
                     ),
                   ),
-
-                  const SizedBox(height: 32),
                 ],
               ),
             ),
           ],
+        ),
+      );
+
+  // ── Build ──────────────────────────────────────────────────────────────────
+
+  @override
+  Widget build(BuildContext context) {
+    final tip = widget.tip;
+    final providerName = tip.legalAidProvider?.fullName ?? 'Legal Provider';
+    final publishTime = timeago.format(tip.publishedAt ?? tip.createdAt);
+
+    return Scaffold(
+      backgroundColor: _bg,
+      body: CustomScrollView(
+        slivers: [
+          // ── Collapsing app bar ───────────────────────────────────────────
+          SliverAppBar(
+            expandedHeight: 280,
+            pinned: true,
+            backgroundColor: _white,
+            foregroundColor: _ink,
+            surfaceTintColor: Colors.transparent,
+            elevation: 0,
+            systemOverlayStyle: SystemUiOverlayStyle.light,
+            leading: _circleBtn(
+              Icons.arrow_back_ios_new_rounded,
+              () => Navigator.pop(context),
+            ),
+            actions: [
+              _circleBtn(
+                _isBookmarked
+                    ? Icons.bookmark_rounded
+                    : Icons.bookmark_border_rounded,
+                () {
+                  setState(() => _isBookmarked = !_isBookmarked);
+                  HapticFeedback.lightImpact();
+                },
+                color: _isBookmarked ? _teal : null,
+              ),
+              _circleBtn(Icons.share_rounded, () {}),
+              const SizedBox(width: 4),
+            ],
+            flexibleSpace: FlexibleSpaceBar(
+              background: _buildHeroImage(),
+            ),
+          ),
+
+          // ── Article body ─────────────────────────────────────────────────
+          SliverToBoxAdapter(
+            child: FadeTransition(
+              opacity: _fadeAnim,
+              child: SlideTransition(
+                position: _slideAnim,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // ── Category + Title ─────────────────────────────────
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(24, 28, 24, 0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Category tag
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 5),
+                            decoration: BoxDecoration(
+                              color: _accent,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: const Text(
+                              'LEGAL TIP',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w800,
+                                color: _tealDark,
+                                letterSpacing: 1.5,
+                              ),
+                            ),
+                          ),
+
+                          const SizedBox(height: 16),
+
+                          // Big editorial title
+                          Text(
+                            tip.title,
+                            style: const TextStyle(
+                              fontFamily: 'Georgia',
+                              fontSize: 30,
+                              fontWeight: FontWeight.w700,
+                              color: _ink,
+                              height: 1.25,
+                              letterSpacing: -0.5,
+                            ),
+                          ),
+
+                          const SizedBox(height: 24),
+
+                          // ── Byline ───────────────────────────────────
+                          Row(
+                            children: [
+                              // Avatar circle
+                              Container(
+                                width: 42,
+                                height: 42,
+                                decoration: const BoxDecoration(
+                                  gradient: LinearGradient(
+                                    colors: [_tealDark, _teal],
+                                    begin: Alignment.topLeft,
+                                    end: Alignment.bottomRight,
+                                  ),
+                                  shape: BoxShape.circle,
+                                ),
+                                alignment: Alignment.center,
+                                child: Text(
+                                  providerName.substring(0, 1).toUpperCase(),
+                                  style: const TextStyle(
+                                    color: _white,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w700,
+                                    fontFamily: 'Georgia',
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      providerName,
+                                      style: const TextStyle(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w700,
+                                        color: _ink,
+                                      ),
+                                    ),
+                                    Text(
+                                      publishTime,
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: _muted,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              // Read time
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 10, vertical: 5),
+                                decoration: BoxDecoration(
+                                  color: _rule.withOpacity(0.8),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Row(
+                                  children: [
+                                    const Icon(Icons.timer_outlined,
+                                        size: 13, color: _muted),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      '${_estimateReadTime(tip.description)} min read',
+                                      style: const TextStyle(
+                                        fontSize: 11,
+                                        color: _muted,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    // ── Rule ─────────────────────────────────────────────
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 24),
+                      child: Divider(color: _rule, thickness: 1, height: 1),
+                    ),
+
+                    // ── Body text with drop cap ───────────────────────────
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: _buildArticleBody(tip.description),
+                    ),
+
+                    const SizedBox(height: 40),
+
+                    // ── Bottom rule ───────────────────────────────────────
+                    const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 24),
+                      child: Divider(color: _rule, thickness: 1, height: 1),
+                    ),
+
+                    const SizedBox(height: 24),
+
+                    // ── Author card ───────────────────────────────────────
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: Container(
+                        padding: const EdgeInsets.all(20),
+                        decoration: BoxDecoration(
+                          color: _accent,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                              color: _teal.withOpacity(0.2), width: 1),
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 56,
+                              height: 56,
+                              decoration: const BoxDecoration(
+                                gradient: LinearGradient(
+                                  colors: [_tealDark, _teal],
+                                  begin: Alignment.topLeft,
+                                  end: Alignment.bottomRight,
+                                ),
+                                shape: BoxShape.circle,
+                              ),
+                              alignment: Alignment.center,
+                              child: Text(
+                                providerName.substring(0, 1).toUpperCase(),
+                                style: const TextStyle(
+                                  color: _white,
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w700,
+                                  fontFamily: 'Georgia',
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    'WRITTEN BY',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: _muted,
+                                      fontWeight: FontWeight.w700,
+                                      letterSpacing: 1.2,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    providerName,
+                                    style: const TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w700,
+                                      color: _ink,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Row(
+                                    children: [
+                                      const Icon(Icons.verified_rounded,
+                                          size: 13, color: _tealDark),
+                                      const SizedBox(width: 4),
+                                      const Text(
+                                        'Verified Legal Provider',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: _tealDark,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(height: 16),
+
+                    // ── Disclaimer ────────────────────────────────────────
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(24, 0, 24, 48),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Icon(Icons.info_outline_rounded,
+                              size: 14, color: _muted),
+                          const SizedBox(width: 8),
+                          const Expanded(
+                            child: Text(
+                              'For informational purposes only. Does not constitute legal advice. Consult a qualified attorney for your specific situation.',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: _muted,
+                                height: 1.5,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Drop-cap article body ──────────────────────────────────────────────────
+
+  Widget _buildArticleBody(String text) {
+    if (text.isEmpty) return const SizedBox.shrink();
+
+    final firstChar = text.substring(0, 1);
+    final rest = text.length > 1 ? text.substring(1) : '';
+
+    return RichText(
+      text: TextSpan(
+        children: [
+          WidgetSpan(
+            child: Padding(
+              padding: const EdgeInsets.only(right: 6, top: 2),
+              child: Text(
+                firstChar,
+                style: const TextStyle(
+                  fontFamily: 'Georgia',
+                  fontSize: 64,
+                  fontWeight: FontWeight.w700,
+                  color: _tealDark,
+                  height: 0.85,
+                ),
+              ),
+            ),
+          ),
+          TextSpan(
+            text: rest,
+            style: const TextStyle(
+              fontSize: 17,
+              color: _inkMid,
+              height: 1.8,
+              letterSpacing: 0.1,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  int _estimateReadTime(String text) {
+    final words = text.trim().split(RegExp(r'\s+')).length;
+    return (words / 200).ceil().clamp(1, 99);
+  }
+
+  Widget _circleBtn(IconData icon, VoidCallback onTap, {Color? color}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.35),
+            shape: BoxShape.circle,
+          ),
+          alignment: Alignment.center,
+          child: Icon(icon, size: 18, color: color ?? _white),
         ),
       ),
     );

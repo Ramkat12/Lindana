@@ -36,6 +36,9 @@ class _LegalAidRequestFormState extends State<LegalAidRequestForm>
   static const _success = Color(0xFF059669);
   static const _errorRed = Color(0xFFDC2626);
 
+  // ✅ FIX 4: Static cache — persists across rebuilds so re-opening is instant
+  static List<LegalAidProvider>? _cachedProviders;
+
   final _formKey = GlobalKey<FormState>();
   final _legalNameController = TextEditingController();
   final _nationalIdController = TextEditingController();
@@ -74,8 +77,9 @@ class _LegalAidRequestFormState extends State<LegalAidRequestForm>
     if (_selectedProvider != null) {
       _selectedExpertiseArea = _selectedProvider!.primaryExpertise;
     }
-    _loadAllProviders();
-    _loadProfileData();
+
+    // ✅ FIX 2: Load profile and providers in parallel
+    Future.wait([_loadAllProviders(), _loadProfileData()]);
 
     // Add listeners for real-time validation feedback
     _legalNameController.addListener(() {
@@ -114,12 +118,26 @@ class _LegalAidRequestFormState extends State<LegalAidRequestForm>
   Future<void> _loadAllProviders() async {
     if (widget.selectedProvider != null) return;
 
+    // ✅ FIX 4: Use cache if available — skips network call entirely
+    if (_cachedProviders != null) {
+      setState(() => _allProviders = _cachedProviders!);
+      return;
+    }
+
     setState(() => _isLoadingProviders = true);
 
     try {
       final providers = await LegalAidService.getLegalAidProviders();
+
+      // ✅ FIX 1: Case-insensitive + trimmed status check
+      final active = providers
+          .where((p) => p.status?.toLowerCase().trim() == 'verified')
+          .toList();
+
+      _cachedProviders = active; // save to cache for next time
+
       setState(() {
-        _allProviders = providers.where((p) => p.status == 'active').toList();
+        _allProviders = active;
         _isLoadingProviders = false;
       });
     } catch (e) {
@@ -566,6 +584,7 @@ class _LegalAidRequestFormState extends State<LegalAidRequestForm>
     ],
   );
 
+  // ✅ FIX 3: Loading state, empty state with retry, and dropdown
   Widget _buildProviderDropdown() => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
@@ -579,8 +598,57 @@ class _LegalAidRequestFormState extends State<LegalAidRequestForm>
                 borderRadius: BorderRadius.circular(12),
                 color: _white,
               ),
-              child: const Center(
-                child: CircularProgressIndicator(strokeWidth: 2),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: _teal,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    'Loading providers...',
+                    style: TextStyle(color: _slate, fontSize: 13),
+                  ),
+                ],
+              ),
+            )
+          : _allProviders.isEmpty
+          ? Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                border: Border.all(color: _errorRed.withOpacity(0.3)),
+                borderRadius: BorderRadius.circular(12),
+                color: _white,
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.warning_amber_rounded, color: _errorRed, size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'No providers available. Tap to retry.',
+                      style: TextStyle(color: _errorRed, fontSize: 13),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      _cachedProviders = null; // clear cache before retry
+                      _loadAllProviders();
+                    },
+                    child: Text(
+                      'Retry',
+                      style: TextStyle(
+                        color: _teal,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             )
           : DropdownButtonFormField<LegalAidProvider>(
