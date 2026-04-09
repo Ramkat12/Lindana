@@ -61,8 +61,11 @@ class _UserLegalaidState extends State<UserLegalaid>
     );
     _fadeAnim = CurvedAnimation(parent: _animController, curve: Curves.easeOut);
     _animController.forward();
-    _loadLegalAidProviders();
-    _fetchPublishedTips();
+    // Run both fetches in parallel — not serial
+    Future.wait([
+      _loadLegalAidProviders(),
+      _fetchPublishedTips(),
+    ]);
   }
 
   @override

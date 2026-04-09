@@ -4,6 +4,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 import 'package:is_project_1/models/profile_response.dart';
 import 'package:is_project_1/pages/user_pages/location_webservices.dart';
+import 'package:is_project_1/services/cache_service.dart';
 import 'package:jwt_decoder/jwt_decoder.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -34,6 +35,14 @@ class ApiService {
 
   // Get user profile
   static Future<ProfileResponse> getProfile() async {
+    const cacheKey = 'user_profile_data';
+    final cached = await CacheService.get(cacheKey);
+    if (cached != null) {
+      try {
+        return ProfileResponse.fromJson(json.decode(cached));
+      } catch (_) {}
+    }
+
     try {
       final token = await getToken();
       if (token == null) {
@@ -49,6 +58,7 @@ class ApiService {
       );
 
       if (response.statusCode == 200) {
+        await CacheService.set(cacheKey, response.body, const Duration(minutes: 30));
         final data = json.decode(response.body);
         return ProfileResponse.fromJson(data);
       } else if (response.statusCode == 401) {
@@ -79,6 +89,14 @@ class ApiService {
 
   // Get emergency contacts (only for role_id == 5)
   static Future<List<EmergencyContact>> getEmergencyContacts() async {
+    const cacheKey = 'emergency_contacts_data';
+    final cached = await CacheService.getList(cacheKey);
+    if (cached != null) {
+      try {
+        return cached.map((e) => EmergencyContact.fromJson(Map<String, dynamic>.from(e))).toList();
+      } catch (_) {}
+    }
+
     try {
       final token = await getToken();
       if (token == null) {
@@ -96,7 +114,8 @@ class ApiService {
 
       if (response.statusCode == 200) {
         final List<dynamic> data = json.decode(response.body);
-        return data.map((json) => EmergencyContact.fromJson(json)).toList();
+        await CacheService.setList(cacheKey, data, const Duration(minutes: 30));
+        return data.map((j) => EmergencyContact.fromJson(j)).toList();
       } else if (response.statusCode == 404) {
         // No emergency contacts found
         return [];

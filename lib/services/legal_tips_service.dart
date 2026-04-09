@@ -4,6 +4,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 import 'package:is_project_1/models/legal_tips_models.dart';
 import 'package:is_project_1/services/api_service.dart';
+import 'package:is_project_1/services/cache_service.dart';
 
 class ApiResponse<T> {
   final bool success;
@@ -308,20 +309,32 @@ class LegalTipsService {
     }
   }
 
-  // ── Get recent published ───────────────────────────────────────────────────
+  // ── Get recent published — cache-first, 10-minute TTL ─────────────────────
   Future<ApiResponse<List<LegalTip>>> getRecentPublishedTips({
     int limit = 10,
   }) async {
+    final cacheKey = 'legal_tips_published_$limit';
+    // Return cached instantly
+    final cached = await CacheService.getList(cacheKey);
+    if (cached != null) {
+      final tips = cached
+          .map((j) => LegalTip.fromJson(Map<String, dynamic>.from(j)))
+          .toList();
+      return ApiResponse<List<LegalTip>>(success: true, data: tips);
+    }
     try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/api/v1/legal-tips/published/recent?limit=$limit'),
-        headers: await _headers(),
-      );
-
+      final response = await http
+          .get(
+            Uri.parse(
+                '$baseUrl/api/v1/legal-tips/published/recent?limit=$limit'),
+            headers: await _headers(),
+          )
+          .timeout(const Duration(seconds: 10));
       if (response.statusCode == 200) {
-        final tips = (jsonDecode(response.body) as List)
-            .map((j) => LegalTip.fromJson(j))
-            .toList();
+        final raw = jsonDecode(response.body) as List;
+        await CacheService.setList(
+            cacheKey, raw, const Duration(minutes: 10));
+        final tips = raw.map((j) => LegalTip.fromJson(j)).toList();
         return ApiResponse<List<LegalTip>>(success: true, data: tips);
       } else {
         final error = jsonDecode(response.body);

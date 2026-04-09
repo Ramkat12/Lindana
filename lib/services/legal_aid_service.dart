@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
+import 'package:is_project_1/services/cache_service.dart';
 import '../models/legal_aid_requests.dart';
 
 class LegalAidService {
@@ -31,18 +32,29 @@ class LegalAidService {
     return _baseUrl!;
   }
 
-  // Get all legal aid providers
+  // Get all legal aid providers — cache-first, 10-minute TTL
   static Future<List<LegalAidProvider>> getLegalAidProviders() async {
+    const cacheKey = 'legal_aid_providers';
+    // Return cached instantly
+    final cached = await CacheService.getList(cacheKey);
+    if (cached != null) {
+      return cached
+          .map((j) => LegalAidProvider.fromJson(Map<String, dynamic>.from(j)))
+          .toList();
+    }
     try {
       final url = await baseUrl;
-      final response = await http.get(
-        Uri.parse('$url/legal-aid-providers'),
-        headers: {'Content-Type': 'application/json'},
-      );
-
+      final response = await http
+          .get(
+            Uri.parse('$url/legal-aid-providers'),
+            headers: {'Content-Type': 'application/json'},
+          )
+          .timeout(const Duration(seconds: 10));
       if (response.statusCode == 200) {
         final List<dynamic> data = json.decode(response.body);
-        return data.map((json) => LegalAidProvider.fromJson(json)).toList();
+        await CacheService.setList(
+            cacheKey, data, const Duration(minutes: 10));
+        return data.map((j) => LegalAidProvider.fromJson(j)).toList();
       } else {
         throw Exception(
           'Failed to load legal aid providers: ${response.statusCode}',

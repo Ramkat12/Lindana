@@ -1,20 +1,24 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
-import 'package:is_project_1/pages/login_page.dart';
 import 'package:is_project_1/pages/admin_pages/admin_homepage.dart';
 import 'package:is_project_1/pages/legal_aid_pages/legalaid_homepage.dart';
+import 'package:is_project_1/pages/login_page.dart';
 import 'package:is_project_1/pages/user_pages/map_page.dart';
 import 'package:is_project_1/pages/user_pages/user_homepage.dart';
 import 'package:is_project_1/services/api_service.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:is_project_1/services/background_service.dart';
+import 'package:is_project_1/services/background_voice_service.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:convert';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-
-import 'package:is_project_1/services/background_service.dart'; // Import service
-import 'package:is_project_1/services/background_voice_service.dart';
+// ── Global navigator key — lets us show dialogs from anywhere (any page) ────
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -22,43 +26,45 @@ Future<void> main() async {
   await ApiService.loadEnv();
 
   try {
-    // Load environment variables
-    await dotenv.load(fileName: ".env");
-
-    // Initialize Background Service
+    await dotenv.load(fileName: '.env');
     await initializeService();
-
-    // Initialize Background Voice Service
+    // Start the global shake detector service immediately
+    FlutterBackgroundService().startService();
     BackgroundVoiceService.init();
 
-    // Set Mapbox Access Token
-    final mapboxToken = dotenv.env["MAPBOX_ACCESS_TOKEN"];
-    if (mapboxToken == null || mapboxToken.isEmpty) {
-      throw Exception('MAPBOX_ACCESS_TOKEN is missing or empty in .env');
-    }
-    MapboxOptions.setAccessToken(mapboxToken);
-
-    // Initialize Supabase
-    final supabaseUrl = dotenv.env["SUPABASE_URL"];
-    final supabaseAnonKey = dotenv.env["SUPABASE_ANON_KEY"];
-
-    if (supabaseUrl == null || supabaseUrl.isEmpty) {
-      throw Exception('SUPABASE_URL is missing or empty in .env');
+    final mapboxToken = dotenv.env['MAPBOX_ACCESS_TOKEN'];
+    if (mapboxToken != null && mapboxToken.isNotEmpty) {
+      MapboxOptions.setAccessToken(mapboxToken);
     }
 
-    if (supabaseAnonKey == null || supabaseAnonKey.isEmpty) {
-      throw Exception('SUPABASE_ANON_KEY is missing or empty in .env');
+    final supabaseUrl = dotenv.env['SUPABASE_URL'];
+    final supabaseAnonKey = dotenv.env['SUPABASE_ANON_KEY'];
+    if (supabaseUrl != null &&
+        supabaseUrl.isNotEmpty &&
+        supabaseAnonKey != null &&
+        supabaseAnonKey.isNotEmpty) {
+      await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
     }
-
-    await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
-
-    print('Supabase and Mapbox initialized successfully');
   } catch (e) {
-    print('Initialization error: $e');
+    debugPrint('Initialization error: $e');
   }
+
+  // ── Universal shake → open Panic Mode ─────────────────────────────
+  FlutterBackgroundService().on('onShakeDetected').listen((_) {
+    final ctx = navigatorKey.currentContext;
+    if (ctx != null) {
+      Navigator.of(ctx).push(
+        MaterialPageRoute(
+          builder: (context) => const MapPage(triggerPanic: true),
+        ),
+      );
+    }
+  });
 
   runApp(const MyApp());
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 final supabase = Supabase.instance.client;
 
@@ -69,12 +75,13 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      home: const AuthWrapper(), // Use AuthWrapper instead of direct LoginPage
+      navigatorKey: navigatorKey,
+      home: const AuthWrapper(),
     );
   }
 }
 
-// New AuthWrapper class to handle authentication state
+// ── Auth wrapper ──────────────────────────────────────────────────────────────
 class AuthWrapper extends StatefulWidget {
   const AuthWrapper({super.key});
 
@@ -99,9 +106,7 @@ class _AuthWrapperState extends State<AuthWrapper> {
       final userId = prefs.getString('user_id');
 
       if (accessToken != null && userId != null) {
-        // Check if token is still valid
         if (await _isTokenValid(accessToken)) {
-          // Token is valid, decode it to get user role
           final roleId = await _getUserRole(accessToken);
           setState(() {
             initialPage = _getPageByRole(roleId);
@@ -109,12 +114,10 @@ class _AuthWrapperState extends State<AuthWrapper> {
           });
           return;
         } else {
-          // Token is expired, try to refresh it
           final refreshToken = prefs.getString('refresh_token');
           if (refreshToken != null && await _refreshAccessToken(refreshToken)) {
-            // Successfully refreshed, get new role
-            final newAccessToken = prefs.getString('access_token');
-            final roleId = await _getUserRole(newAccessToken!);
+            final newAccessToken = prefs.getString('access_token')!;
+            final roleId = await _getUserRole(newAccessToken);
             setState(() {
               initialPage = _getPageByRole(roleId);
               isLoading = false;
@@ -124,13 +127,12 @@ class _AuthWrapperState extends State<AuthWrapper> {
         }
       }
 
-      // No valid token found, go to login
       setState(() {
         initialPage = const LoginPage();
         isLoading = false;
       });
     } catch (e) {
-      print('Auth check error: $e');
+      debugPrint('Auth check error: $e');
       setState(() {
         initialPage = const LoginPage();
         isLoading = false;
@@ -142,19 +144,15 @@ class _AuthWrapperState extends State<AuthWrapper> {
     try {
       final parts = token.split('.');
       if (parts.length != 3) return false;
-
-      final payload = parts[1];
-      final normalized = base64Url.normalize(payload);
-      final decoded = utf8.decode(base64Url.decode(normalized));
-      final decodedPayload = json.decode(decoded);
-
-      final exp = decodedPayload['exp'];
+      final decoded = utf8.decode(
+        base64Url.decode(base64Url.normalize(parts[1])),
+      );
+      final exp = json.decode(decoded)['exp'];
       if (exp == null) return false;
-
-      final expirationDate = DateTime.fromMillisecondsSinceEpoch(exp * 1000);
-      return DateTime.now().isBefore(expirationDate);
-    } catch (e) {
-      print('Token validation error: $e');
+      return DateTime.now().isBefore(
+        DateTime.fromMillisecondsSinceEpoch(exp * 1000),
+      );
+    } catch (_) {
       return false;
     }
   }
@@ -163,15 +161,11 @@ class _AuthWrapperState extends State<AuthWrapper> {
     try {
       final parts = token.split('.');
       if (parts.length != 3) throw Exception('Invalid token');
-
-      final payload = parts[1];
-      final normalized = base64Url.normalize(payload);
-      final decoded = utf8.decode(base64Url.decode(normalized));
-      final decodedPayload = json.decode(decoded);
-
-      return decodedPayload['role_id'] ?? 0;
-    } catch (e) {
-      print('Role extraction error: $e');
+      final decoded = utf8.decode(
+        base64Url.decode(base64Url.normalize(parts[1])),
+      );
+      return json.decode(decoded)['role_id'] ?? 0;
+    } catch (_) {
       return 0;
     }
   }
@@ -201,16 +195,16 @@ class _AuthWrapperState extends State<AuthWrapper> {
       );
 
       if (response.statusCode == 200) {
-        final responseData = json.decode(response.body);
-        await prefs.setString('access_token', responseData['access_token']);
-        if (responseData['refresh_token'] != null) {
-          await prefs.setString('refresh_token', responseData['refresh_token']);
+        final data = json.decode(response.body);
+        await prefs.setString('access_token', data['access_token']);
+        if (data['refresh_token'] != null) {
+          await prefs.setString('refresh_token', data['refresh_token']);
         }
         return true;
       }
       return false;
     } catch (e) {
-      print('Token refresh error: $e');
+      debugPrint('Token refresh error: $e');
       return false;
     }
   }
@@ -220,7 +214,6 @@ class _AuthWrapperState extends State<AuthWrapper> {
     if (isLoading) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
-
-    return initialPage ?? const MapPage();
+    return initialPage ?? const UserHomepage();
   }
 }

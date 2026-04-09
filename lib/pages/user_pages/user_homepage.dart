@@ -5,13 +5,16 @@ import 'package:is_project_1/pages/user_pages/map_page.dart';
 import 'package:is_project_1/pages/user_pages/player.dart';
 import 'package:is_project_1/pages/user_pages/user_legalaid.dart';
 import 'package:is_project_1/pages/user_pages/videos.dart';
+import 'package:is_project_1/pages/user_pages/voice_activation_page.dart';
 import 'package:is_project_1/services/api_service.dart';
+import 'package:is_project_1/services/background_voice_service.dart';
+import 'package:is_project_1/services/cache_service.dart';
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:is_project_1/pages/user_pages/safety_tips_page.dart';
-import 'package:webview_flutter/webview_flutter.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:youtube_player_flutter/youtube_player_flutter.dart';
 import 'package:geolocator/geolocator.dart';
@@ -169,6 +172,11 @@ class _UserHomepageState extends State<UserHomepage>
   Set<gmaps.Circle> _mapCircles = {};
   bool _mapReady = false;
 
+  // ── Voice activation state (shown on home page) ────────────────────────
+  bool _voiceEnabled = false;
+  String _wakePhrase = 'tuma msaada';
+  bool _reminderDismissed = false;
+
   late AnimationController _heroCtrl;
   late Animation<double> _heroAnim;
 
@@ -182,14 +190,52 @@ class _UserHomepageState extends State<UserHomepage>
     _heroAnim = CurvedAnimation(parent: _heroCtrl, curve: Curves.easeOut);
     _heroCtrl.forward();
     _initAll();
+    _loadVoiceSettings();
+    // Hook voice service so alerts fire even when on the home page.
+    // Wake phrase → silent SMS alert (NOT panic dialog).
+    BackgroundVoiceService.instance.onWakeWordDetected = _sendAlertFromVoice;
+    BackgroundVoiceService.instance.startIfEnabled();
   }
 
   @override
   void dispose() {
     _heroCtrl.dispose();
     _mapController?.dispose();
+    // Clear hook so MapPage can re-register when navigated to
+    if (BackgroundVoiceService.instance.onWakeWordDetected == _sendAlertFromVoice) {
+      BackgroundVoiceService.instance.onWakeWordDetected = null;
+    }
     super.dispose();
   }
+
+  // ── Load voice prefs — used for the reminder banner ─────────────────────
+  Future<void> _loadVoiceSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _voiceEnabled = prefs.getBool('voice_activation_enabled') ?? false;
+      _wakePhrase = prefs.getString('voice_wake_word') ?? 'tuma msaada';
+    });
+  }
+
+  // ── Voice alert callback (main isolate) ─────────────────────────────────
+  // SMS is already sent by the background isolate — even when app is closed.
+  // Shows a full popup dialog when the app is in the foreground.
+  Future<void> _sendAlertFromVoice() async {
+    if (!mounted) return;
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.black.withOpacity(0.85),
+      pageBuilder: (ctx, _, __) => _HomeVoiceAlertDialog(),
+      transitionBuilder: (ctx, anim, _, child) => ScaleTransition(
+        scale: CurvedAnimation(parent: anim, curve: Curves.easeOutBack),
+        child: child,
+      ),
+      transitionDuration: const Duration(milliseconds: 350),
+    );
+  }
+
 
   Future<void> _initAll() async {
     await loadEnv();
@@ -226,6 +272,10 @@ class _UserHomepageState extends State<UserHomepage>
           perm == LocationPermission.deniedForever)
         return;
       _currentPos = await Geolocator.getCurrentPosition();
+      // Persist for background isolate
+      await BackgroundVoiceService.savePositionForBackground(
+        _currentPos!.latitude, _currentPos!.longitude,
+      );
     } catch (_) {}
   }
 
@@ -243,38 +293,63 @@ class _UserHomepageState extends State<UserHomepage>
   }
 
   Future<void> _fetchSafetyTips() async {
+    const key = 'safety_tips';
+    // Show cached instantly
+    final cached = await CacheService.getList(key);
+    if (cached != null && mounted) {
+      setState(() {
+        safetyTips = cached.map((e) => SafetyTip.fromJson(e)).toList();
+        tipsLoading = false;
+      });
+    }
     try {
-      final res = await http.get(Uri.parse('$baseUrl/get_tips'));
+      final res = await http
+          .get(Uri.parse('$baseUrl/get_tips'))
+          .timeout(const Duration(seconds: 10));
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body) as List;
-        setState(() {
-          safetyTips = data.map((e) => SafetyTip.fromJson(e)).toList();
-          tipsLoading = false;
-        });
+        await CacheService.setList(key, data, const Duration(minutes: 10));
+        if (mounted) {
+          setState(() {
+            safetyTips = data.map((e) => SafetyTip.fromJson(e)).toList();
+            tipsLoading = false;
+          });
+        }
       } else {
-        setState(() => tipsLoading = false);
+        if (mounted) setState(() => tipsLoading = false);
       }
     } catch (_) {
-      setState(() => tipsLoading = false);
+      if (mounted) setState(() => tipsLoading = false);
     }
   }
 
   Future<void> _fetchEducationalContent() async {
+    const key = 'edu_content';
+    final cached = await CacheService.getList(key);
+    if (cached != null && mounted) {
+      setState(() {
+        educationalItems = cached.map((e) => EducationalContent.fromJson(e)).toList();
+        eduLoading = false;
+      });
+    }
     try {
-      final res = await http.get(Uri.parse('$baseUrl/get_educational_content'));
+      final res = await http
+          .get(Uri.parse('$baseUrl/get_educational_content'))
+          .timeout(const Duration(seconds: 10));
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body) as List;
-        setState(() {
-          educationalItems = data
-              .map((e) => EducationalContent.fromJson(e))
-              .toList();
-          eduLoading = false;
-        });
+        await CacheService.setList(key, data, const Duration(minutes: 15));
+        if (mounted) {
+          setState(() {
+            educationalItems = data.map((e) => EducationalContent.fromJson(e)).toList();
+            eduLoading = false;
+          });
+        }
       } else {
-        setState(() => eduLoading = false);
+        if (mounted) setState(() => eduLoading = false);
       }
     } catch (_) {
-      setState(() => eduLoading = false);
+      if (mounted) setState(() => eduLoading = false);
     }
   }
 
@@ -305,42 +380,64 @@ class _UserHomepageState extends State<UserHomepage>
   }
 
   Future<void> _fetchPoliceStations() async {
+    const key = 'hp_nearby_police';
+    final cached = await CacheService.getList(key);
+    if (cached != null && mounted) {
+      setState(() {
+        policeStations = cached.map((e) => PoliceStation.fromJson(e)).toList();
+        policeLoading = false;
+      });
+    }
     try {
       final lat = _currentPos?.latitude ?? -1.286389;
       final lng = _currentPos?.longitude ?? 36.817223;
-      final res = await http.get(
-        Uri.parse(
-          '$baseUrl/nearby-police?latitude=$lat&longitude=$lng&radius=5000',
-        ),
-      );
+      final res = await http
+          .get(Uri.parse('$baseUrl/nearby-police?latitude=$lat&longitude=$lng&radius=5000'))
+          .timeout(const Duration(seconds: 10));
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body)['nearby_police'] as List;
-        setState(() {
-          policeStations = data.map((e) => PoliceStation.fromJson(e)).toList();
-          policeLoading = false;
-        });
+        await CacheService.setList(key, data, const Duration(minutes: 5));
+        if (mounted) {
+          setState(() {
+            policeStations = data.map((e) => PoliceStation.fromJson(e)).toList();
+            policeLoading = false;
+          });
+        }
       } else {
-        setState(() => policeLoading = false);
+        if (mounted) setState(() => policeLoading = false);
       }
     } catch (_) {
-      setState(() => policeLoading = false);
+      if (mounted) setState(() => policeLoading = false);
     }
   }
 
   Future<void> _fetchDangerZones() async {
+    const key = 'hp_danger_zones';
+    final cached = await CacheService.getList(key);
+    if (cached != null && mounted) {
+      setState(() {
+        dangerZones = cached.map((e) => DangerZone.fromJson(e)).toList();
+        dangerLoading = false;
+      });
+    }
     try {
-      final res = await http.get(Uri.parse('$baseUrl/danger-zones'));
+      final res = await http
+          .get(Uri.parse('$baseUrl/danger-zones'))
+          .timeout(const Duration(seconds: 10));
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body) as List;
-        setState(() {
-          dangerZones = data.map((e) => DangerZone.fromJson(e)).toList();
-          dangerLoading = false;
-        });
+        await CacheService.setList(key, data, const Duration(minutes: 5));
+        if (mounted) {
+          setState(() {
+            dangerZones = data.map((e) => DangerZone.fromJson(e)).toList();
+            dangerLoading = false;
+          });
+        }
       } else {
-        setState(() => dangerLoading = false);
+        if (mounted) setState(() => dangerLoading = false);
       }
     } catch (_) {
-      setState(() => dangerLoading = false);
+      if (mounted) setState(() => dangerLoading = false);
     }
   }
 
@@ -724,6 +821,12 @@ class _UserHomepageState extends State<UserHomepage>
             padding: const EdgeInsets.fromLTRB(20, 24, 20, 32),
             sliver: SliverList(
               delegate: SliverChildListDelegate([
+                // ── Wake phrase reminder banner (shown when voice enabled) ──
+                if (_voiceEnabled && !_reminderDismissed)
+                  _wakePhraseBanner(),
+                if (_voiceEnabled && !_reminderDismissed)
+                  const SizedBox(height: 16),
+
                 // ── Quick Actions ────────────────────────────────────────────
                 _label('Quick Actions'),
                 const SizedBox(height: 14),
@@ -817,6 +920,106 @@ class _UserHomepageState extends State<UserHomepage>
         ],
       ),
       bottomNavigationBar: const CustomBottomNavigationBar(currentIndex: 0),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // WAKE PHRASE REMINDER BANNER
+  // ═══════════════════════════════════════════════════════════════════════════
+  Widget _wakePhraseBanner() {
+    return GestureDetector(
+      onTap: () async {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const VoiceActivationPage()),
+        );
+        // Refresh phrase after returning from settings
+        _loadVoiceSettings();
+      },
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            colors: [Color(0xFF2E86AB), Color(0xFF4FABCB)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF4FABCB).withOpacity(0.3),
+              blurRadius: 10,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            // mic icon
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.18),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.mic_rounded, color: Colors.white, size: 22),
+            ),
+            const SizedBox(width: 12),
+
+            // text col
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    '🔔 Voice Alert Active',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  RichText(
+                    text: TextSpan(
+                      style: TextStyle(
+                        color: Colors.white.withOpacity(0.85),
+                        fontSize: 12,
+                      ),
+                      children: [
+                        const TextSpan(text: 'Say '),
+                        TextSpan(
+                          text: '"$_wakePhrase"',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                        const TextSpan(text: ' to send a silent alert'),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            // dismiss button
+            GestureDetector(
+              onTap: () => setState(() => _reminderDismissed = true),
+              child: Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.15),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.close, color: Colors.white, size: 16),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1847,4 +2050,149 @@ class _UserHomepageState extends State<UserHomepage>
       child: SingleChildScrollView(child: Text(content)),
     ),
   );
+}
+
+// ── Home page voice alert dialog ─────────────────────────────────────────────
+class _HomeVoiceAlertDialog extends StatefulWidget {
+  @override
+  State<_HomeVoiceAlertDialog> createState() => _HomeVoiceAlertDialogState();
+}
+
+class _HomeVoiceAlertDialogState extends State<_HomeVoiceAlertDialog>
+    with TickerProviderStateMixin {
+  late AnimationController _pulseCtrl;
+  late Animation<double> _pulseAnim;
+  Timer? _auto;
+  int _count = 10;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 700),
+    )..repeat(reverse: true);
+    _pulseAnim = Tween<double>(begin: 0.85, end: 1.15).animate(
+      CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut),
+    );
+    _auto = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) { t.cancel(); return; }
+      setState(() => _count--);
+      if (_count <= 0) { t.cancel(); _dismiss(); }
+    });
+  }
+
+  @override
+  void dispose() {
+    _pulseCtrl.dispose();
+    _auto?.cancel();
+    super.dispose();
+  }
+
+  void _dismiss() {
+    if (mounted && Navigator.of(context).canPop()) Navigator.of(context).pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Container(
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            colors: [Color(0xFF1A6B8A), Color(0xFF4FABCB)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          borderRadius: BorderRadius.circular(24),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF4FABCB).withOpacity(0.5),
+              blurRadius: 30,
+              spreadRadius: 5,
+            ),
+          ],
+        ),
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AnimatedBuilder(
+              animation: _pulseAnim,
+              builder: (_, __) => Transform.scale(
+                scale: _pulseAnim.value,
+                child: Container(
+                  width: 72, height: 72,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.15),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.mic_rounded, color: Colors.white, size: 40),
+                ),
+              ),
+            ),
+            const SizedBox(height: 18),
+            const Text(
+              '📩 ALERT SENT',
+              style: TextStyle(
+                color: Colors.white, fontSize: 22,
+                fontWeight: FontWeight.w900, letterSpacing: 1.2,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.check_circle, color: Colors.white, size: 20),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Wake phrase detected. SMS sent to your emergency contacts.',
+                      style: TextStyle(
+                        color: Colors.white, fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Your location was included in the alert.',
+              style: TextStyle(color: Colors.white.withOpacity(0.75), fontSize: 12),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 22),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: _dismiss,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: const Color(0xFF1A6B8A),
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  elevation: 0,
+                ),
+                child: Text(
+                  'OK — Dismiss ($_count)',
+                  style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

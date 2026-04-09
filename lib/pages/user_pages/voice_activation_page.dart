@@ -21,7 +21,7 @@ class _VoiceActivationPageState extends State<VoiceActivationPage>
     with SingleTickerProviderStateMixin {
   // ── Settings ────────────────────────────────────────────────────────────────
   bool _isEnabled = false;
-  String _wakeWord = 'msaada';
+  String _wakeWord = 'tuma msaada';
   final _wakeWordCtrl = TextEditingController();
 
   // ── Speech ──────────────────────────────────────────────────────────────────
@@ -48,7 +48,10 @@ class _VoiceActivationPageState extends State<VoiceActivationPage>
   void initState() {
     super.initState();
     _speech = stt.SpeechToText();
-    _loadSettings();
+    _loadSettings().then((_) async {
+      // FREEDOM FOR THE MIC: Stop the background process while configuring
+      await BackgroundVoiceService.instance.stop();
+    });
 
     _pulseCtrl = AnimationController(
       vsync: this,
@@ -65,6 +68,15 @@ class _VoiceActivationPageState extends State<VoiceActivationPage>
     _pulseCtrl.dispose();
     _wakeWordCtrl.dispose();
     if (_isListening) _speech.stop();
+    
+    // Resume background listening when leaving the config page
+    if (_isEnabled) {
+      BackgroundVoiceService.instance.onWakeWordDetected = widget.onWakeWordDetected;
+      BackgroundVoiceService.instance.startIfEnabled();
+    } else {
+      BackgroundVoiceService.instance.stop();
+    }
+    
     super.dispose();
   }
 
@@ -73,7 +85,7 @@ class _VoiceActivationPageState extends State<VoiceActivationPage>
     final prefs = await SharedPreferences.getInstance();
     setState(() {
       _isEnabled = prefs.getBool('voice_activation_enabled') ?? false;
-      _wakeWord = prefs.getString('voice_wake_word') ?? 'msaada';
+      _wakeWord = prefs.getString('voice_wake_word') ?? 'tuma msaada';
       _wakeWordCtrl.text = _wakeWord;
     });
   }
@@ -81,7 +93,16 @@ class _VoiceActivationPageState extends State<VoiceActivationPage>
   Future<void> _saveSettings() async {
     final trimmed = _wakeWordCtrl.text.trim();
     if (trimmed.isEmpty) {
-      _showSnack('Wake word cannot be empty', isError: true);
+      _showSnack('Wake phrase cannot be empty', isError: true);
+      return;
+    }
+    // Require at least 2 words to reduce false triggers
+    final words = trimmed.split(RegExp(r'\s+'));
+    if (words.length < 2) {
+      _showSnack(
+        'Please enter at least 2 words (e.g. "tuma msaada") to avoid false alarms.',
+        isError: true,
+      );
       return;
     }
 
@@ -90,18 +111,9 @@ class _VoiceActivationPageState extends State<VoiceActivationPage>
     await prefs.setString('voice_wake_word', trimmed);
     setState(() => _wakeWord = trimmed);
 
-    if (_isEnabled) {
-      // Push new word to running isolate live (no restart needed)
-      await BackgroundVoiceService.instance.updateWakeWord(trimmed);
-      // Make sure service is running (in case it was off before)
-      BackgroundVoiceService.instance.onWakeWordDetected =
-          widget.onWakeWordDetected;
-      await BackgroundVoiceService.instance.startIfEnabled();
-    } else {
-      // User turned it off — kill the service
-      await BackgroundVoiceService.instance.stop();
-    }
-
+    // Background service is restarted automatically on dispose()
+    // This allows the user to test the phrase immediately without mic lock errors.
+    
     _showSnack('Settings saved ✓');
   }
 
@@ -186,18 +198,16 @@ class _VoiceActivationPageState extends State<VoiceActivationPage>
     );
   }
 
-  // ── Wake word check ──────────────────────────────────────────────────────────
+  // ── Wake word check ────────────────────────────────────────────────────────────
   void _checkWakeWord(String spoken) {
     final detected = spoken.toLowerCase().contains(_wakeWord.toLowerCase());
 
     setState(() => _status = detected ? _Status.detected : _Status.missed);
 
     if (detected) {
-      // ✅ Fire panic mode immediately
-      widget.onWakeWordDetected?.call();
-
-      // Also show a brief local confirmation
-      _showSnack('🚨 Wake word detected! Panic mode activated.');
+      // When testing: just show confirmation — do NOT open panic dialog.
+      // In production the background service sends the real SMS alert.
+      _showSnack('✅ Phrase detected! An alert would be sent to your contacts.');
     }
   }
 
@@ -236,13 +246,13 @@ class _VoiceActivationPageState extends State<VoiceActivationPage>
             ? "Listening… say '$_wakeWord'"
             : 'Hearing: "$_heardText"';
       case _Status.detected:
-        return '✅ Wake word detected! Panic mode activated.';
+        return '✅ Phrase detected! Alert would be sent to your contacts.';
       case _Status.missed:
-        return '❌ Heard: "$_heardText" — wake word not found.';
+        return '❌ Heard: "$_heardText" — phrase not matched.';
       case _Status.error:
         return 'Microphone error. Please try again.';
       case _Status.idle:
-        return 'Press the mic to test your wake word.';
+        return 'Press the mic to test your wake phrase.';
     }
   }
 
@@ -287,7 +297,7 @@ class _VoiceActivationPageState extends State<VoiceActivationPage>
                 subtitle: Padding(
                   padding: const EdgeInsets.only(top: 4),
                   child: Text(
-                    'Say your wake word to immediately trigger panic mode',
+                    'Say your wake phrase to silently alert your emergency contacts without opening the app',
                     style: TextStyle(color: Colors.grey[500], fontSize: 13),
                   ),
                 ),
@@ -309,15 +319,44 @@ class _VoiceActivationPageState extends State<VoiceActivationPage>
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'This is the word or phrase that triggers panic mode when spoken.',
+                    'Enter at least 2 words as your secret phrase (e.g. "kujeni hapa" or "tuma msaada"). Using 2+ words prevents false triggers from everyday speech.',
                     style: TextStyle(color: Colors.grey[500], fontSize: 13),
+                  ),
+                  const SizedBox(height: 10),
+                  // Kiswahili tip
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE8F5E9),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: const Color(0xFF81C784), width: 1),
+                    ),
+                    child: const Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('🇰🇪 ', style: TextStyle(fontSize: 16)),
+                        SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            'Kiswahili tip: For Swahili phrases to be recognised, go to '
+                            'Phone Settings → Language & Input → Speech → Offline Speech '
+                            'and download the Kiswahili (sw-KE) language pack.',
+                            style: TextStyle(
+                              color: Color(0xFF2E7D32),
+                              fontSize: 12,
+                              height: 1.5,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                   const SizedBox(height: 16),
                   TextField(
                     controller: _wakeWordCtrl,
                     style: const TextStyle(color: _dark, fontSize: 15),
                     decoration: InputDecoration(
-                      hintText: 'e.g. msaada, help me, emergency',
+                      hintText: 'e.g. kujeni hapa, tuma msaada, help me now',
                       hintStyle: TextStyle(
                         color: Colors.grey[400],
                         fontSize: 14,
@@ -377,7 +416,7 @@ class _VoiceActivationPageState extends State<VoiceActivationPage>
               child: Column(
                 children: [
                   Text(
-                    'Press the mic and say your wake word.\nIf detected, panic mode will activate immediately.',
+                    'Press the mic and say your wake phrase.\nIf detected, a silent alert is sent to your contacts.',
                     textAlign: TextAlign.center,
                     style: TextStyle(color: Colors.grey[500], fontSize: 13),
                   ),
@@ -461,19 +500,19 @@ class _VoiceActivationPageState extends State<VoiceActivationPage>
                 children: [
                   _howItWorksRow(
                     Icons.mic_rounded,
-                    'App listens for your wake word',
+                    'App listens for your 2-word wake phrase in background',
                     '1',
                   ),
                   const SizedBox(height: 14),
                   _howItWorksRow(
-                    Icons.warning_rounded,
-                    'Panic mode triggers instantly',
+                    Icons.send_rounded,
+                    'A silent SMS alert is sent to your emergency contacts',
                     '2',
                   ),
                   const SizedBox(height: 14),
                   _howItWorksRow(
-                    Icons.sms_rounded,
-                    'Emergency SMS sent to your contacts',
+                    Icons.notifications_active_rounded,
+                    'You get a confirmation — app stays open, no panic screen',
                     '3',
                   ),
                 ],

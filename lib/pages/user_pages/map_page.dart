@@ -9,9 +9,11 @@ import 'package:geolocator/geolocator.dart' as gl;
 import 'package:http/http.dart' as http;
 import 'package:is_project_1/pages/user_pages/location_webservices.dart';
 import 'package:is_project_1/services/background_voice_service.dart';
+import 'package:is_project_1/services/cache_service.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' as mp;
 import 'package:google_maps_flutter/google_maps_flutter.dart' as gmaps;
 import 'package:sensors_plus/sensors_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:vibration/vibration.dart';
 
 import 'package:is_project_1/components/custom_bootom_navbar.dart';
@@ -146,15 +148,7 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   List<EmergencyContact> emergencyContacts = [];
   ProfileResponse? profile;
   bool isInPanicMode = false;
-  int shakeCount = 0;
-  DateTime? lastShakeTime;
-  Timer? shakeResetTimer;
   StreamSubscription? accelerometerSubscription;
-
-  // Shake params
-  static const double shakeThreshold = 12.0;
-  static const int shakeCountThreshold = 3;
-  static const Duration shakeTimeWindow = Duration(seconds: 2);
 
   // ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -166,10 +160,11 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     _initializeMapbox();
     _setupPositionTracking();
     _loadEmergencyContacts();
-    _setupShakeDetection();
     _initializeWebSocket();
     _loadMapData();
-    BackgroundVoiceService.instance.onWakeWordDetected = _triggerPanicMode;
+    // Wake phrase → silent alert (NOT panic mode).
+    // Panic mode is only triggered by shake or the panic button.
+    BackgroundVoiceService.instance.onWakeWordDetected = _sendAlertFromVoice;
     BackgroundVoiceService.instance.startIfEnabled();
     if (widget.triggerPanic) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _triggerPanicMode());
@@ -193,13 +188,30 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     userPositionStream?.cancel();
     accelerometerSubscription?.cancel();
-    shakeResetTimer?.cancel();
     gpsLoggingTimer?.cancel();
     _locationUpdateSubscription?.cancel();
     _connectionStatusSubscription?.cancel();
     LocationWebSocketService.instance.dispose();
     BackgroundVoiceService.instance.onWakeWordDetected = null;
     super.dispose();
+  }
+
+  // ── Voice alert (wake phrase detected) ─────────────────────────────────────
+  // SMS is already sent by the background isolate.
+  // Shows the same universal popup as the shake alert.
+  Future<void> _sendAlertFromVoice() async {
+    if (!mounted) return;
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.black.withOpacity(0.85),
+      pageBuilder: (ctx, _, __) => _VoiceAlertDialog(),
+      transitionBuilder: (ctx, anim, _, child) => ScaleTransition(
+        scale: CurvedAnimation(parent: anim, curve: Curves.easeOutBack),
+        child: child,
+      ),
+      transitionDuration: const Duration(milliseconds: 350),
+    );
   }
 
   @override
@@ -233,6 +245,15 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   }
 
   Future<void> _fetchNearbyPoliceLocations(double lat, double lng) async {
+    const cacheKey = 'nearby_police';
+    // 1. Show cached data instantly (zero-wait)
+    final cached = await CacheService.getList(cacheKey);
+    if (cached != null && mounted) {
+      setState(() {
+        policeLocations = cached.map((j) => PoliceLocation.fromJson(j)).toList();
+      });
+    }
+    // 2. Fetch fresh data in the background
     try {
       final uri = Uri.parse('$API_BASE_URL/nearby-police').replace(
         queryParameters: {
@@ -241,18 +262,19 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
           'radius': '5000',
         },
       );
-      final response = await http.get(
-        uri,
-        headers: {'Content-Type': 'application/json'},
-      );
+      final response = await http
+          .get(uri, headers: {'Content-Type': 'application/json'})
+          .timeout(const Duration(seconds: 10));
       if (response.statusCode == 200) {
         final data = json.decode(response.body) as Map<String, dynamic>;
         final locations = data['nearby_police'] as List<dynamic>;
-        setState(() {
-          policeLocations = locations
-              .map((j) => PoliceLocation.fromJson(j))
-              .toList();
-        });
+        // Cache for 5 minutes
+        await CacheService.setList(cacheKey, locations, const Duration(minutes: 5));
+        if (mounted) {
+          setState(() {
+            policeLocations = locations.map((j) => PoliceLocation.fromJson(j)).toList();
+          });
+        }
       }
     } catch (e) {
       debugPrint('Error fetching nearby police: $e');
@@ -260,16 +282,29 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   }
 
   Future<void> _fetchDangerZones() async {
+    const cacheKey = 'danger_zones';
+    // Show stale data instantly
+    final cached = await CacheService.getList(cacheKey);
+    if (cached != null && mounted) {
+      setState(() {
+        dangerZones = cached.map((j) => DangerZone.fromJson(j)).toList();
+      });
+    }
     try {
-      final response = await http.get(
-        Uri.parse('$API_BASE_URL/danger-zones'),
-        headers: {'Content-Type': 'application/json'},
-      );
+      final response = await http
+          .get(
+            Uri.parse('$API_BASE_URL/danger-zones'),
+            headers: {'Content-Type': 'application/json'},
+          )
+          .timeout(const Duration(seconds: 10));
       if (response.statusCode == 200) {
         final data = json.decode(response.body) as List<dynamic>;
-        setState(() {
-          dangerZones = data.map((j) => DangerZone.fromJson(j)).toList();
-        });
+        await CacheService.setList(cacheKey, data, const Duration(minutes: 5));
+        if (mounted) {
+          setState(() {
+            dangerZones = data.map((j) => DangerZone.fromJson(j)).toList();
+          });
+        }
       }
     } catch (e) {
       debugPrint('Error fetching danger zones: $e');
@@ -465,6 +500,10 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
             ),
           ).listen((gl.Position pos) {
             currentPosition = pos;
+            // Persist for background isolate (SMS alert uses last known position)
+            BackgroundVoiceService.savePositionForBackground(
+              pos.latitude, pos.longitude,
+            );
             // Move camera with user
             if (googleMapController != null && isMapReady) {
               googleMapController!.animateCamera(
@@ -552,6 +591,13 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
         profile = profileData;
         emergencyContacts = contacts;
       });
+      // ── Persist for background isolate so SMS works when app is closed ──
+      await BackgroundVoiceService.saveContactsForBackground(
+        contacts.map((c) => c.toJson()).toList(),
+      );
+      // Also store base URL and token for the isolate
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('api_base_url', API_BASE_URL);
     } catch (e) {
       debugPrint('Error loading profile: $e');
     }
@@ -758,31 +804,6 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
       );
   }
 
-  // ── shake detection ───────────────────────────────────────────────────────
-
-  void _setupShakeDetection() {
-    accelerometerSubscription = accelerometerEvents.listen((event) {
-      final g = sqrt(pow(event.x, 2) + pow(event.y, 2) + pow(event.z, 2));
-      if (g > shakeThreshold) {
-        final now = DateTime.now();
-        if (lastShakeTime == null ||
-            now.difference(lastShakeTime!) < shakeTimeWindow) {
-          shakeCount++;
-          lastShakeTime = now;
-          if (shakeCount >= shakeCountThreshold) {
-            _triggerPanicMode();
-            shakeCount = 0;
-          }
-          shakeResetTimer?.cancel();
-          shakeResetTimer = Timer(shakeTimeWindow, () => shakeCount = 0);
-        } else {
-          shakeCount = 1;
-          lastShakeTime = now;
-        }
-      }
-    });
-  }
-
   // ── panic ─────────────────────────────────────────────────────────────────
 
   Future<void> _triggerPanicMode() async {
@@ -854,7 +875,8 @@ class _MapPageState extends State<MapPage> with WidgetsBindingObserver {
   void _cancelPanicMode() {
     setState(() => isInPanicMode = false);
     Vibration.cancel();
-    BackgroundVoiceService.instance.onWakeWordDetected = _triggerPanicMode;
+    // Restore voice hook to silent alert after panic is cancelled
+    BackgroundVoiceService.instance.onWakeWordDetected = _sendAlertFromVoice;
     BackgroundVoiceService.instance.resume();
     if (Navigator.canPop(context)) Navigator.of(context).pop();
   }
@@ -1628,6 +1650,156 @@ class _PanicScreenState extends State<PanicScreen>
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Voice Alert Dialog ────────────────────────────────────────────────────────
+// Shown in-app when the wake phrase is detected. SMS already sent by background.
+class _VoiceAlertDialog extends StatefulWidget {
+  @override
+  State<_VoiceAlertDialog> createState() => _VoiceAlertDialogState();
+}
+
+class _VoiceAlertDialogState extends State<_VoiceAlertDialog>
+    with TickerProviderStateMixin {
+  late AnimationController _pulseCtrl;
+  late Animation<double> _pulseAnim;
+  Timer? _autoDismiss;
+  int _countdown = 10;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 700),
+    )..repeat(reverse: true);
+    _pulseAnim = Tween<double>(begin: 0.85, end: 1.15).animate(
+      CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut),
+    );
+    _autoDismiss = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) { t.cancel(); return; }
+      setState(() => _countdown--);
+      if (_countdown <= 0) { t.cancel(); _dismiss(); }
+    });
+  }
+
+  @override
+  void dispose() {
+    _pulseCtrl.dispose();
+    _autoDismiss?.cancel();
+    super.dispose();
+  }
+
+  void _dismiss() {
+    if (mounted && Navigator.of(context).canPop()) Navigator.of(context).pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Container(
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            colors: [Color(0xFF1A6B8A), Color(0xFF4FABCB)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          borderRadius: BorderRadius.circular(24),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF4FABCB).withOpacity(0.5),
+              blurRadius: 30,
+              spreadRadius: 5,
+            ),
+          ],
+        ),
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AnimatedBuilder(
+              animation: _pulseAnim,
+              builder: (_, __) => Transform.scale(
+                scale: _pulseAnim.value,
+                child: Container(
+                  width: 72,
+                  height: 72,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.15),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.mic_rounded, color: Colors.white, size: 40),
+                ),
+              ),
+            ),
+            const SizedBox(height: 18),
+            const Text(
+              '📩 ALERT SENT',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 22,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 1.2,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.check_circle, color: Colors.white, size: 20),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Wake phrase detected. SMS sent to your emergency contacts.',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Your location was included in the alert.',
+              style: TextStyle(color: Colors.white.withOpacity(0.75), fontSize: 12),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 22),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: _dismiss,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: const Color(0xFF1A6B8A),
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  elevation: 0,
+                ),
+                child: Text(
+                  'OK — Dismiss ($_countdown)',
+                  style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15),
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
