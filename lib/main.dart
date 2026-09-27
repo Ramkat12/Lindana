@@ -14,6 +14,7 @@ import 'package:is_project_1/services/api_service.dart';
 import 'package:is_project_1/services/background_service.dart';
 import 'package:is_project_1/services/background_voice_service.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
+import 'package:is_project_1/services/local_database_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -50,7 +51,12 @@ Future<void> main() async {
   }
 
   // ── Universal shake → open Panic Mode ─────────────────────────────
+  bool isPanicDebounce = false;
   FlutterBackgroundService().on('onShakeDetected').listen((_) {
+    if (isPanicDebounce) return;
+    isPanicDebounce = true;
+    Future.delayed(const Duration(seconds: 15), () => isPanicDebounce = false);
+
     final ctx = navigatorKey.currentContext;
     if (ctx != null) {
       Navigator.of(ctx).push(
@@ -101,6 +107,42 @@ class _AuthWrapperState extends State<AuthWrapper> {
 
   Future<void> _checkAuthState() async {
     try {
+      // 1. Try to load user session from the local SQLite database
+      final localSession = await LocalDatabaseService.instance.getSession();
+
+      if (localSession != null) {
+        final accessToken = localSession['access_token'] as String?;
+        final roleId = localSession['role_id'] as int?;
+
+        if (accessToken != null && roleId != null) {
+          if (await _isTokenValid(accessToken)) {
+            setState(() {
+              initialPage = _getPageByRole(roleId);
+              isLoading = false;
+            });
+            // Update in-memory and SQLite cache in background
+            ApiService.getProfile().catchError((e) {
+              debugPrint('Background profile refresh failed: $e');
+            });
+            return;
+          } else {
+            final refreshToken = localSession['refresh_token'] as String?;
+            if (refreshToken != null && await _refreshAccessToken(refreshToken)) {
+              final updatedSession = await LocalDatabaseService.instance.getSession();
+              if (updatedSession != null) {
+                final newRoleId = updatedSession['role_id'] as int? ?? roleId;
+                setState(() {
+                  initialPage = _getPageByRole(newRoleId);
+                  isLoading = false;
+                });
+                return;
+              }
+            }
+          }
+        }
+      }
+
+      // 2. Legacy fallback: check SharedPreferences
       final prefs = await SharedPreferences.getInstance();
       final accessToken = prefs.getString('access_token');
       final userId = prefs.getString('user_id');
@@ -111,6 +153,10 @@ class _AuthWrapperState extends State<AuthWrapper> {
           setState(() {
             initialPage = _getPageByRole(roleId);
             isLoading = false;
+          });
+          // Cache the profile details to local SQLite in background
+          ApiService.getProfile().catchError((e) {
+            debugPrint('Background profile caching failed: $e');
           });
           return;
         } else {
@@ -196,10 +242,19 @@ class _AuthWrapperState extends State<AuthWrapper> {
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        await prefs.setString('access_token', data['access_token']);
-        if (data['refresh_token'] != null) {
-          await prefs.setString('refresh_token', data['refresh_token']);
+        final newAccessToken = data['access_token'];
+        final newRefreshToken = data['refresh_token'] ?? refreshToken;
+
+        await prefs.setString('access_token', newAccessToken);
+        await prefs.setString('refresh_token', newRefreshToken);
+
+        // Update tokens in local SQLite database session
+        try {
+          await LocalDatabaseService.instance.updateTokens(newAccessToken, newRefreshToken);
+        } catch (dbErr) {
+          print('LocalDatabase update tokens error: $dbErr');
         }
+
         return true;
       }
       return false;

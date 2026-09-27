@@ -305,8 +305,18 @@ class LocationSharingSession(Base):
     contacts = Column(String(1000))  # JSON string of contact list
     expires_at = Column(DateTime, nullable=False)
     created_at = Column(TIMESTAMP, server_default=text("now()"))
-    is_active = Column(Boolean, default=True)
-    
     user = relationship("User", back_populates="sharing_sessions")
+
+
+class PasswordResetOTP(Base):
+    __tablename__ = "password_reset_otps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), index=True, nullable=False)
+    otp_code = Column(String(6), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    is_used = Column(Boolean, default=False)
+    created_at = Column(TIMESTAMP, server_default=text("now()"))
+
 
 

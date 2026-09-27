@@ -17,6 +17,7 @@ import base64
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
+from database import get_db
 
 # Load environment variables from .env file
 load_dotenv()
@@ -71,25 +72,63 @@ def save_base64_image(base64_string: str, user_id: int, user_type: str) -> str:
         return None
     
 # Fix 1: Update get_current_user function to return consistent keys
-def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
+def get_token_record(db: Session, user_type: str, access_token: str):
+    if user_type == "user":
+        return db.query(models.UserTokenTable).filter(
+            models.UserTokenTable.access_token == access_token
+        ).first()
+    elif user_type == "legal_aid":
+        return db.query(models.LegalAidTokenTable).filter(
+            models.LegalAidTokenTable.access_token == access_token
+        ).first()
+    return None
+
+
+def get_token_record_by_refresh(db: Session, user_type: str, refresh_token: str):
+    if user_type == "user":
+        return db.query(models.UserTokenTable).filter(
+            models.UserTokenTable.refresh_token == refresh_token
+        ).first()
+    elif user_type == "legal_aid":
+        return db.query(models.LegalAidTokenTable).filter(
+            models.LegalAidTokenTable.refresh_token == refresh_token
+        ).first()
+    return None
+
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> dict:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
+
     try:
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("type") != "access":
+            raise credentials_exception
+
         user_id: str = payload.get("sub")
         user_type: str = payload.get("user_type")
-        
+        role_id = payload.get("role_id")
+
         if user_id is None or user_type is None:
             raise credentials_exception
-        
-        # Return with consistent key names
-        return {"user_id": user_id, "user_type": user_type}
     except JWTError:
         raise credentials_exception
+
+    # A token is only valid while its DB record is still marked active —
+    # this is what makes /logout actually revoke access instead of just
+    # flipping a column nobody reads.
+    token_record = get_token_record(db, user_type, token)
+    if not token_record or not token_record.status:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return {"user_id": user_id, "user_type": user_type, "role_id": role_id, "token": token}
 
 
 # Password functions
@@ -106,6 +145,7 @@ def create_access_token(user_id: str, user_type: str, role_id: int):
         "sub": str(user_id),  # Convert UUID to string
         "user_type": user_type,
         "role_id": role_id,
+        "type": "access",
         "exp": datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     }
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm=ALGORITHM)
@@ -113,13 +153,15 @@ def create_access_token(user_id: str, user_type: str, role_id: int):
 
 
 
-def create_refresh_token(user_id: int):
+def create_refresh_token(user_id: str, user_type: str):
     expire = datetime.utcnow() + timedelta(minutes=REFRESH_TOKEN_EXPIRE_MINUTES)
     payload = {
         "sub": str(user_id),
+        "user_type": user_type,
+        "type": "refresh",
         "exp": expire
     }
-    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode(payload, JWT_REFRESH_SECRET_KEY, algorithm=ALGORITHM)
 
 # Database query functions
 def get_user_by_phone(db: Session, phone_number: str):

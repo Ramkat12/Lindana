@@ -3,6 +3,8 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
+import 'package:is_project_1/services/local_database_service.dart';
+
 class AuthService {
   static const String _accessTokenKey = 'access_token';
   static const String _refreshTokenKey = 'refresh_token';
@@ -141,6 +143,14 @@ class AuthService {
     await prefs.remove(_accessTokenKey);
     await prefs.remove(_refreshTokenKey);
     await prefs.remove(_userIdKey);
+
+    // Clear local SQLite user session and cached contacts
+    try {
+      await LocalDatabaseService.instance.clearSession();
+      await LocalDatabaseService.instance.clearLocalEmergencyContacts();
+    } catch (e) {
+      print('LocalDatabase clear error: $e');
+    }
   }
 
   // Private helper methods

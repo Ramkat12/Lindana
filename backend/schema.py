@@ -75,6 +75,10 @@ class ShowUser(UserBase):
 class TokenSchema(BaseModel):
     access_token: str
     refresh_token: str
+    role_id: Optional[int] = None
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
 
 class changepassword(BaseModel):
     email:str

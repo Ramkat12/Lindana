@@ -1522,6 +1522,8 @@ class _PanicScreenState extends State<PanicScreen>
 
   int tapCount = 0;
   Timer? tapTimer;
+  int _secondsLeft = 60;
+  Timer? _countdownTimer;
 
   @override
   void initState() {
@@ -1541,13 +1543,22 @@ class _PanicScreenState extends State<PanicScreen>
       CurvedAnimation(parent: _shakeController, curve: Curves.elasticIn),
     );
     _pulseController.repeat(reverse: true);
-    Timer(const Duration(seconds: 30), () {
-      if (mounted) widget.onCancel();
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) return;
+      setState(() {
+        if (_secondsLeft > 0) {
+          _secondsLeft--;
+        } else {
+          timer.cancel();
+          widget.onCancel();
+        }
+      });
     });
   }
 
   @override
   void dispose() {
+    _countdownTimer?.cancel();
     _pulseController.dispose();
     _shakeController.dispose();
     tapTimer?.cancel();
@@ -1609,7 +1620,16 @@ class _PanicScreenState extends State<PanicScreen>
                     style: const TextStyle(color: Colors.white, fontSize: 18),
                     textAlign: TextAlign.center,
                   ),
-                  const SizedBox(height: 60),
+                  const SizedBox(height: 20),
+                  Text(
+                    'Auto-canceling in $_secondsLeft seconds',
+                    style: TextStyle(
+                      color: Colors.white.withOpacity(0.85),
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 40),
                   GestureDetector(
                     onTap: _handleTap,
                     child: Container(

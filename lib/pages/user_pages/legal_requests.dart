@@ -58,7 +58,8 @@ class _LegalRequestsScreenState extends State<LegalRequestsScreen> {
 
         Map<String, LegalAidProvider> providers = {};
 
-        for (String providerId in providerIds) {
+        // Fetch concurrently
+        await Future.wait(providerIds.map((providerId) async {
           try {
             final provider = await LegalRequestService.fetchProviderById(
               providerId,
@@ -80,7 +81,7 @@ class _LegalRequestsScreenState extends State<LegalRequestsScreen> {
               about: 'No information available',
             );
           }
-        }
+        }));
 
         setState(() {
           _requests = safeRequests;

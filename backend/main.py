@@ -35,8 +35,8 @@ from schema import CreateUser, CreateLegalAid, changepassword, TokenSchema, Show
 from crud import verify_password, get_password_hash, create_access_token, create_refresh_token,get_current_user
 from fastapi import Request
 import requests
-from auth import jwt_bearer, decodeJWT
-import jwt
+from jose import jwt, JWTError
+from rate_limit import rate_limit
 from dotenv import load_dotenv
 import os
 from fastapi.middleware.cors import CORSMiddleware
@@ -81,11 +81,6 @@ app.include_router(legal_requests.router)
 app.include_router(legal_provider.router)
 app.include_router(locations.router)
 ##app.include_router(authentication.router)
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 10080))   # 7 days
-REFRESH_TOKEN_EXPIRE_MINUTES = int(os.getenv("REFRESH_TOKEN_EXPIRE_MINUTES", 43200))  # 30 days
-ALGORITHM = "HS256"
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-JWT_REFRESH_SECRET_KEY = os.getenv("JWT_REFRESH_SECRET_KEY")
 # Serve uploaded images as static files
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 router = APIRouter()
@@ -93,7 +88,7 @@ active_connections = {}
 @app.get("/")
 async def root():
     return {"message": "Hello from FastAPI!"}
-@app.post("/login", response_model=TokenSchema)
+@app.post("/login", response_model=TokenSchema, dependencies=[Depends(rate_limit("login", limit=10, window_seconds=60))])
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     print(f"--- Login Attempt: {form_data.username} ---")
     # User Query
@@ -142,7 +137,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
         )
 
     access_token = create_access_token(authenticated_user.id, user_type, role_id)
-    refresh_token = create_refresh_token(authenticated_user.id)
+    refresh_token = create_refresh_token(authenticated_user.id, user_type)
 
     if user_type == "user":
         token_db = UserTokenTable(
@@ -224,8 +219,8 @@ def google_login(token: str, db: Session = Depends(get_db)):
         db.add(user)
         db.commit()
         db.refresh(user)
-    access_token = create_access_token(user.id, "user")
-    refresh_token = create_refresh_token(user.id)
+    access_token = create_access_token(user.id, "user", user.role_id)
+    refresh_token = create_refresh_token(user.id, "user")
     token_db = UserTokenTable(
         user_id=user.id,
         access_token=access_token,
@@ -237,10 +232,11 @@ def google_login(token: str, db: Session = Depends(get_db)):
     db.refresh(token_db)
     return {
         "access_token": access_token,
-        "refresh_token": refresh_token
+        "refresh_token": refresh_token,
+        "role_id": user.role_id
     }
 @app.get('/getusers', response_model=list[ShowUser])
-def getusers(db: Session = Depends(get_db), token: str = Depends(jwt_bearer)):
+def getusers(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     users = db.query(models.User).all()
     return users
 @app.get("/expertise-areas", response_model=List[showExpertiseArea])
@@ -340,38 +336,75 @@ def edit_profile(request: editprofile, db: Session = Depends(get_db), current_us
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update profile")
 @app.post('/logout')
-def logout(token: str = Depends(jwt_bearer), db: Session = Depends(get_db)):
-    try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = payload.get("sub")
-        user_type = payload.get("user_type")
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    if user_type == "user":
-        token_record = db.query(UserTokenTable).filter(
-            UserTokenTable.user_id == user_id,
-            UserTokenTable.access_token == token
-        ).first()
-    elif user_type == "legal_aid":
-        token_record = db.query(LegalAidTokenTable).filter(
-            LegalAidTokenTable.provider_id == user_id,
-            LegalAidTokenTable.access_token == token
-        ).first()
-    else:
-        raise HTTPException(status_code=400, detail="Unknown user type")
+def logout(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    token_record = crud.get_token_record(db, current_user["user_type"], current_user["token"])
     if not token_record:
         raise HTTPException(status_code=404, detail="Token not found")
     token_record.status = False
     db.commit()
     return {"message": "Logged out successfully"}
+@app.post("/auth/refresh", response_model=TokenSchema)
+def refresh_access_token(req: schema.RefreshTokenRequest, db: Session = Depends(get_db)):
+    invalid_refresh_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired refresh token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(req.refresh_token, crud.JWT_REFRESH_SECRET_KEY, algorithms=[crud.ALGORITHM])
+        if payload.get("type") != "refresh":
+            raise invalid_refresh_exception
+        user_id = payload.get("sub")
+        user_type = payload.get("user_type")
+        if not user_id or not user_type:
+            raise invalid_refresh_exception
+    except JWTError:
+        raise invalid_refresh_exception
+
+    token_record = crud.get_token_record_by_refresh(db, user_type, req.refresh_token)
+    if not token_record or not token_record.status:
+        raise invalid_refresh_exception
+
+    if user_type == "user":
+        account = db.query(models.User).filter(models.User.id == user_id).first()
+    else:
+        account = db.query(models.LegalAidProvider).filter(models.LegalAidProvider.id == user_id).first()
+    if not account:
+        raise invalid_refresh_exception
+
+    new_access_token = create_access_token(account.id, user_type, account.role_id)
+
+    # Reissue the row rather than mutating access_token in place — it's the
+    # table's primary key, so an update-in-place would fight the identity map.
+    db.delete(token_record)
+    db.flush()
+    if user_type == "user":
+        new_record = UserTokenTable(
+            user_id=account.id,
+            access_token=new_access_token,
+            refresh_token=req.refresh_token,
+            status=True
+        )
+    else:
+        new_record = LegalAidTokenTable(
+            provider_id=account.id,
+            access_token=new_access_token,
+            refresh_token=req.refresh_token,
+            status=True
+        )
+    db.add(new_record)
+    db.commit()
+
+    return {
+        "access_token": new_access_token,
+        "refresh_token": req.refresh_token,
+        "role_id": account.role_id
+    }
 @app.get("/emergency-contacts")
-def get_emergency_contacts(token: str = Depends(jwt_bearer), db: Session = Depends(get_db)):
-    payload = decodeJWT(token)
-    if not payload:
-        raise HTTPException(status_code=403, detail="Invalid token")
-    user_id = payload.get("sub")
-    user_type = payload.get("user_type")
-    role_id = payload.get("role_id")
+def get_emergency_contacts(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    user_id = current_user["user_id"]
+    user_type = current_user["user_type"]
+    role_id = current_user["role_id"]
     # Only allow users (not legal aid providers) and only those with role_id == 5
     if user_type != "user" or role_id != 5:
         raise HTTPException(
@@ -393,24 +426,11 @@ def get_emergency_contacts(token: str = Depends(jwt_bearer), db: Session = Depen
         })
     return contacts_response
 @app.get("/profile")
-def get_profile(token: str = Depends(jwt_bearer), db: Session = Depends(get_db)):
-    print(f"DEBUG: Received token: {token[:50]}...")
-    
-    payload = decodeJWT(token)
-    print(f"DEBUG: Decoded payload: {payload}")
-    
-    if not payload:
-        print("DEBUG: Invalid token - payload is None")
-        raise HTTPException(status_code=403, detail="Invalid token")
-    
-    user_id = payload.get("sub")
-    user_type = payload.get("user_type")
-    role_id = payload.get("role_id")
-    
-    print(f"DEBUG: user_id={user_id} (type: {type(user_id)})")
-    print(f"DEBUG: user_type={user_type}")
-    print(f"DEBUG: role_id={role_id}")
-    
+def get_profile(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    user_id = current_user["user_id"]
+    user_type = current_user["user_type"]
+    role_id = current_user["role_id"]
+
     if user_type == "user":
         # Try both string and converted types
         print(f"DEBUG: Querying User table with id: {user_id}")
@@ -516,6 +536,152 @@ async def log_request(request: Request, call_next):
     
     response = await call_next(request)
     return response
+
+
+import random
+import smtplib
+from email.mime.text import MIMEText
+from database import engine
+from models import Base, PasswordResetOTP
+
+# Force create all database tables (including password_reset_otps)
+try:
+    Base.metadata.create_all(bind=engine)
+    print("Database tables verified/created successfully.")
+except Exception as db_err:
+    print(f"Error creating database tables: {db_err}")
+
+# Pydantic schemas for password reset
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    email: str
+    otp: str
+    new_password: str
+
+GENERIC_FORGOT_PASSWORD_RESPONSE = {
+    "detail": "If an account exists for that email address, a verification code has been sent to it."
+}
+
+@app.post("/auth/forgot-password", dependencies=[Depends(rate_limit("forgot-password", limit=5, window_seconds=300))])
+def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    email = req.email.strip().lower()
+
+    # 1. Search in users and legal aid providers
+    user = db.query(models.User).filter(func.lower(models.User.email) == email).first()
+    provider = db.query(models.LegalAidProvider).filter(func.lower(models.LegalAidProvider.email) == email).first()
+
+    if not user and not provider:
+        # Same response whether or not the account exists, so this endpoint
+        # can't be used to enumerate registered emails.
+        return GENERIC_FORGOT_PASSWORD_RESPONSE
+
+    # 2. Generate time-limited 6-digit OTP
+    otp_code = f"{random.randint(100000, 999999)}"
+    expires_at = datetime.utcnow() + timedelta(minutes=15)
+
+    # 3. Save OTP record to database
+    otp_record = PasswordResetOTP(
+        email=email,
+        otp_code=otp_code,
+        expires_at=expires_at,
+        is_used=False
+    )
+    db.add(otp_record)
+    db.commit()
+
+    # 4. Attempt to send email
+    smtp_username = os.getenv("SMTP_USERNAME")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(os.getenv("SMTP_PORT", 587))
+    smtp_from_email = os.getenv("SMTP_FROM_EMAIL", smtp_username or "no-reply@lindana.com")
+
+    email_sent = False
+
+    if smtp_username and smtp_password:
+        try:
+            msg = MIMEText(
+                f"Hello,\n\nYou requested a password reset for your LINDANA account.\n"
+                f"Your 6-digit verification code is: {otp_code}\n\n"
+                f"This code will expire in 15 minutes.\n\n"
+                f"If you did not request this, please ignore this email."
+            )
+            msg['Subject'] = "LINDANA - Password Reset Verification Code"
+            msg['From'] = smtp_from_email
+            msg['To'] = email
+
+            with smtplib.SMTP(smtp_host, smtp_port) as server:
+                server.starttls()
+                server.login(smtp_username, smtp_password)
+                server.send_message(msg)
+
+            email_sent = True
+            logger.info(f"Password reset OTP sent to {email} via SMTP.")
+        except Exception as smtp_err:
+            logger.error(f"Failed to send email via SMTP: {smtp_err}")
+
+    # Dev/Testing fallback: Print code to terminal logs so they can test immediately
+    if not email_sent:
+        print(f"\n==============================================")
+        print(f"DEVELOPMENT FALLBACK FOR EMAIL OTP")
+        print(f"To: {email}")
+        print(f"OTP Verification Code: {otp_code}")
+        print(f"==============================================\n")
+        logger.info(f"Dev fallback: password reset code for {email} printed to terminal: {otp_code}")
+
+    return GENERIC_FORGOT_PASSWORD_RESPONSE
+
+@app.post("/auth/reset-password", dependencies=[Depends(rate_limit("reset-password", limit=10, window_seconds=300))])
+def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
+    email = req.email.strip().lower()
+    otp = req.otp.strip()
+    
+    # 1. Look up matching un-used and un-expired OTP
+    otp_record = db.query(PasswordResetOTP).filter(
+        PasswordResetOTP.email == email,
+        PasswordResetOTP.otp_code == otp,
+        PasswordResetOTP.is_used == False,
+        PasswordResetOTP.expires_at > datetime.utcnow()
+    ).order_by(PasswordResetOTP.created_at.desc()).first()
+    
+    if not otp_record:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The verification code is invalid or has expired. Please request a new one."
+        )
+    
+    # 2. Update user password
+    user = db.query(models.User).filter(func.lower(models.User.email) == email).first()
+    provider = db.query(models.LegalAidProvider).filter(func.lower(models.LegalAidProvider.email) == email).first()
+    
+    hashed_password = get_password_hash(req.new_password)
+    
+    if user:
+        user.password_hash = hashed_password
+        db.add(user)
+    elif provider:
+        provider.password_hash = hashed_password
+        db.add(provider)
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Account not found."
+        )
+        
+    # 3. Mark OTP as used
+    otp_record.is_used = True
+    db.add(otp_record)
+    
+    db.commit()
+    logger.info(f"Password reset successfully completed for account: {email}")
+    
+    return {
+        "detail": "Your password has been reset successfully. You can now log in with your new password."
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

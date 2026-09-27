@@ -7,6 +7,7 @@ import 'package:is_project_1/components/my_button.dart';
 import 'package:is_project_1/components/my_textfield.dart';
 import 'package:is_project_1/pages/admin_pages/admin_homepage.dart';
 import 'package:is_project_1/pages/legal_aid_pages/legalaid_homepage.dart';
+import 'package:is_project_1/pages/forgot_password_page.dart';
 import 'package:is_project_1/pages/register_page.dart';
 import 'package:is_project_1/pages/user_pages/user_homepage.dart';
 import 'package:is_project_1/services/auth_service.dart';
@@ -238,7 +239,12 @@ class _LoginPageState extends State<LoginPage>
                           alignment: Alignment.centerRight,
                           child: GestureDetector(
                             onTap: () {
-                              // TODO: Implement forgot password
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (context) => const ForgotPasswordPage(),
+                                ),
+                              );
                             },
                             child: const Text(
                               'Forgot Password?',

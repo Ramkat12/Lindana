@@ -92,7 +92,7 @@ class _VoiceTaskHandler extends TaskHandler {
         onStatus: (status) {
           if (status == 'done' || status == 'notListening') {
             _isListening = false;
-            Future.delayed(const Duration(milliseconds: 500), _listen);
+            Future.delayed(const Duration(milliseconds: 1500), _listen);
           }
         },
         onError: (_) {
@@ -112,7 +112,7 @@ class _VoiceTaskHandler extends TaskHandler {
           if (_phraseDetected(spoken, phrase)) {
             await _handleDetected();
           }
-          Future.delayed(const Duration(milliseconds: 300), _listen);
+          Future.delayed(const Duration(milliseconds: 1000), _listen);
         }
       },
       listenFor: const Duration(seconds: 10),
@@ -233,8 +233,8 @@ class BackgroundVoiceService {
       ),
       iosNotificationOptions: const IOSNotificationOptions(),
       foregroundTaskOptions: const ForegroundTaskOptions(
-        // Watchdog every 5 s — keeps speech loop alive
-        interval: 5000,
+        // Watchdog every 10 s — keeps speech loop alive but saves battery
+        interval: 10000,
         isOnceEvent: false,
         autoRunOnBoot: true, // Restart after phone reboot
         allowWakeLock: true,

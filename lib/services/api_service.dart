@@ -6,6 +6,7 @@ import 'package:is_project_1/models/profile_response.dart';
 import 'package:is_project_1/pages/user_pages/location_webservices.dart';
 import 'package:is_project_1/services/cache_service.dart';
 import 'package:jwt_decoder/jwt_decoder.dart';
+import 'package:is_project_1/services/local_database_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiService {
@@ -60,13 +61,52 @@ class ApiService {
       if (response.statusCode == 200) {
         await CacheService.set(cacheKey, response.body, const Duration(minutes: 30));
         final data = json.decode(response.body);
-        return ProfileResponse.fromJson(data);
+        final profile = ProfileResponse.fromJson(data);
+
+        // Synchronize with local SQLite database for auto-login & offline access
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          final accessToken = prefs.getString('access_token') ?? '';
+          final refreshToken = prefs.getString('refresh_token') ?? '';
+          await LocalDatabaseService.instance.saveSession(
+            id: profile.id.toString(),
+            name: profile.name,
+            email: profile.email,
+            phoneNumber: profile.phoneNumber,
+            profileImage: profile.profileImage,
+            userType: profile.userType,
+            roleId: profile.roleId,
+            accessToken: accessToken,
+            refreshToken: refreshToken,
+          );
+        } catch (dbErr) {
+          print('LocalDatabase save session error: $dbErr');
+        }
+
+        return profile;
       } else if (response.statusCode == 401) {
         throw Exception('Authentication failed. Please login again.');
       } else {
         throw Exception('Failed to load profile: ${response.statusCode}');
       }
     } catch (e) {
+      // Offline fallback: try to load the local user profile cached in sqflite
+      try {
+        final localUser = await LocalDatabaseService.instance.getSession();
+        if (localUser != null) {
+          return ProfileResponse(
+            id: int.tryParse(localUser['id'].toString()) ?? 0,
+            name: localUser['name'] ?? '',
+            email: localUser['email'] ?? '',
+            phoneNumber: localUser['phone_number'],
+            profileImage: localUser['profile_image'],
+            userType: localUser['user_type'] ?? 'user',
+            roleId: localUser['role_id'] ?? 5,
+          );
+        }
+      } catch (dbErr) {
+        print('Offline local session retrieval failed: $dbErr');
+      }
       throw Exception('Network error: $e');
     }
   }
@@ -90,6 +130,8 @@ class ApiService {
   // Get emergency contacts (only for role_id == 5)
   static Future<List<EmergencyContact>> getEmergencyContacts() async {
     const cacheKey = 'emergency_contacts_data';
+    
+    // First try the memory/shared-preferences cache
     final cached = await CacheService.getList(cacheKey);
     if (cached != null) {
       try {
@@ -115,7 +157,16 @@ class ApiService {
       if (response.statusCode == 200) {
         final List<dynamic> data = json.decode(response.body);
         await CacheService.setList(cacheKey, data, const Duration(minutes: 30));
-        return data.map((j) => EmergencyContact.fromJson(j)).toList();
+        final contacts = data.map((j) => EmergencyContact.fromJson(j)).toList();
+
+        // Overwrite the local SQLite database for completely offline support
+        try {
+          await LocalDatabaseService.instance.saveEmergencyContacts(contacts);
+        } catch (dbErr) {
+          print('LocalDatabase cache contacts error: $dbErr');
+        }
+
+        return contacts;
       } else if (response.statusCode == 404) {
         // No emergency contacts found
         return [];
@@ -125,6 +176,15 @@ class ApiService {
         );
       }
     } catch (e) {
+      // Offline fallback: load emergency contacts cached in SQLite (Room)
+      try {
+        final localContacts = await LocalDatabaseService.instance.getLocalEmergencyContacts();
+        if (localContacts.isNotEmpty) {
+          return localContacts;
+        }
+      } catch (dbErr) {
+        print('Offline local contacts retrieval failed: $dbErr');
+      }
       throw Exception('Network error: $e');
     }
   }

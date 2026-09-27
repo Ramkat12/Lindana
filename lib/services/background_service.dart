@@ -91,7 +91,8 @@ void onStart(ServiceInstance service) async {
   int shakeCount = 0;
   DateTime? lastShakeTime;
 
-  accelerometerEvents.listen((AccelerometerEvent event) {
+  accelerometerEventStream(samplingPeriod: const Duration(milliseconds: 200))
+      .listen((AccelerometerEvent event) {
     final double magnitude =
         sqrt(pow(event.x, 2) + pow(event.y, 2) + pow(event.z, 2));
 

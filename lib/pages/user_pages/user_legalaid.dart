@@ -11,6 +11,7 @@ import 'package:timeago/timeago.dart' as timeago;
 import '../../models/legal_aid_requests.dart';
 import '../../services/legal_aid_service.dart';
 import 'legal_aid_provider_detail.dart';
+import '../../services/api_service.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -513,15 +514,14 @@ class _UserLegalaidState extends State<UserLegalaid>
                     width: 2,
                   ),
                 ),
-                child: CircleAvatar(
-                  radius: 32,
-                  backgroundImage: p.profileImage != null
-                      ? NetworkImage(p.profileImage!)
-                      : null,
-                  backgroundColor: _teal.withOpacity(0.1),
-                  child: p.profileImage == null
-                      ? Icon(Icons.person, color: _teal, size: 28)
-                      : null,
+                child: ClipOval(
+                  child: SizedBox(
+                    width: 64,
+                    height: 64,
+                    child: p.profileImage != null && p.profileImage!.isNotEmpty
+                        ? _buildProfileImageContent(p.profileImage!)
+                        : _profilePlaceholder(),
+                  ),
                 ),
               ),
               if (p.status == 'active')
@@ -752,8 +752,61 @@ class _UserLegalaidState extends State<UserLegalaid>
         errorWidget: (_, __, ___) => _tipPlaceholder(),
       );
     }
-    return _tipPlaceholder();
+    // Fallback: let's try it as a partial path just in case
+    return CachedNetworkImage(
+      imageUrl: _buildFullImageUrl(imageUrl),
+      fit: BoxFit.cover,
+      placeholder: (_, __) => _tipPlaceholder(),
+      errorWidget: (_, __, ___) => _tipPlaceholder(),
+    );
   }
+
+  Widget _buildProfileImageContent(String imageUrl) {
+    if (imageUrl.isEmpty) return _profilePlaceholder();
+    final url = imageUrl.trim();
+
+    if (_isLocalFilePath(url)) {
+      return CachedNetworkImage(
+        imageUrl: _buildFullImageUrl(url),
+        fit: BoxFit.cover,
+        placeholder: (_, __) => _profilePlaceholder(),
+        errorWidget: (_, __, ___) => _profilePlaceholder(),
+      );
+    }
+    if (_isDataUri(url) || _isBase64(url)) {
+      try {
+        Uint8List bytes = base64Decode(_getBase64Data(url));
+        return Image.memory(
+          bytes,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _profilePlaceholder(),
+        );
+      } catch (_) {
+        return _profilePlaceholder();
+      }
+    }
+    if (_isValidUrl(url)) {
+      return CachedNetworkImage(
+        imageUrl: url,
+        fit: BoxFit.cover,
+        placeholder: (_, __) => _profilePlaceholder(),
+        errorWidget: (_, __, ___) => _profilePlaceholder(),
+      );
+    }
+    
+    // Fallback
+    return CachedNetworkImage(
+      imageUrl: _buildFullImageUrl(url),
+      fit: BoxFit.cover,
+      placeholder: (_, __) => _profilePlaceholder(),
+      errorWidget: (_, __, ___) => _profilePlaceholder(),
+    );
+  }
+
+  Widget _profilePlaceholder() => Container(
+    color: _teal.withOpacity(0.1),
+    child: const Icon(Icons.person, color: _teal, size: 28),
+  );
 
   Widget _tipPlaceholder() => Container(
     color: _purple.withOpacity(0.08),
@@ -912,8 +965,11 @@ class _UserLegalaidState extends State<UserLegalaid>
       path.contains('/uploads/');
 
   String _buildFullImageUrl(String path) {
-    const baseUrl = 'https://d2d35afcbdcd.ngrok-free.app';
-    return path.startsWith('/') ? '$baseUrl$path' : '$baseUrl/$path';
+    String base = ApiService.baseUrl;
+    if (base.endsWith('/')) {
+      base = base.substring(0, base.length - 1);
+    }
+    return path.startsWith('/') ? '$base$path' : '$base/$path';
   }
 
   bool _isDataUri(String str) =>
